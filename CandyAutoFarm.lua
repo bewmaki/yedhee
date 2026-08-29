@@ -16,6 +16,38 @@ local IS_MOBILE = getgenv().AraiForceMobile == true
 	or mobilePlatform
 	or (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
 
+local function cleanupOldAraiWindows()
+	local roots, knownRoots = {}, {}
+	local function addRoot(root)
+		if typeof(root) == "Instance" and not knownRoots[root] then
+			knownRoots[root] = true
+			roots[#roots + 1] = root
+		end
+	end
+
+	if type(gethui) == "function" then
+		local ok, hiddenUI = pcall(gethui)
+		if ok then addRoot(hiddenUI) end
+	end
+	local okCore, coreGui = pcall(function() return game:GetService("CoreGui") end)
+	if okCore then addRoot(coreGui) end
+	addRoot(player:FindFirstChildOfClass("PlayerGui"))
+
+	local oldScreens = {}
+	for _, root in ipairs(roots) do
+		for _, object in ipairs(root:GetDescendants()) do
+			if (object:IsA("TextLabel") or object:IsA("TextButton"))
+				and string.find(object.Text, "A-RAI HUB | Never Town", 1, true) then
+				local screen = object:FindFirstAncestorOfClass("ScreenGui")
+				if screen then oldScreens[screen] = true end
+			end
+		end
+	end
+	for screen in pairs(oldScreens) do pcall(function() screen:Destroy() end) end
+end
+
+cleanupOldAraiWindows()
+
 local previousLibrary = getgenv().Library
 if type(previousLibrary) == "table" and type(previousLibrary.Unload) == "function" then
 	pcall(previousLibrary.Unload, previousLibrary)
