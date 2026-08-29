@@ -7,6 +7,7 @@ local VirtualUser = game:GetService("VirtualUser")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local player = Players.LocalPlayer
 local platformOk, platform = pcall(function() return UserInputService:GetPlatform() end)
 local mobilePlatform = platformOk and (platform == Enum.Platform.Android or platform == Enum.Platform.IOS)
@@ -101,6 +102,19 @@ if type(previousAntiAFK) == "table" and type(previousAntiAFK.Stop) == "function"
 	pcall(previousAntiAFK.Stop, previousAntiAFK)
 end
 getgenv().AraiAntiAFK = nil
+local previousFishing = getgenv().AraiFishingAutoPerfect or getgenv().FishingAutoPerfect
+if type(previousFishing) == "table" then
+	previousFishing.Enabled = false
+	if type(previousFishing.Stop) == "function" then
+		pcall(previousFishing.Stop, previousFishing)
+	else
+		for _, connection in ipairs(previousFishing.Connections or {}) do
+			pcall(function() connection:Disconnect() end)
+		end
+	end
+end
+getgenv().AraiFishingAutoPerfect = nil
+getgenv().FishingAutoPerfect = nil
 
 local CROPS = {
 	{ "Cauliflower", Vector3.new(-4167.1, 74.5, 1250.2), Vector3.new(-4145.3, 84.5, 1253.4), Vector3.new(-0.922, -0.363, -0.136) },
@@ -2405,21 +2419,203 @@ function AntiAFK:Stop()
 	if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
 end
 
+local FishingAutoPerfect = {
+	Enabled = false,
+	ReadyToClick = false,
+	Clicking = false,
+	WaitingFeedback = false,
+	MinigameVisible = false,
+	MinigameStartedAt = 0,
+	InitialDashRotation = 0,
+	DashStartedMoving = false,
+	LastClickAt = 0,
+	Tolerance = 9,
+	RunId = 0,
+	Connections = {},
+}
+
+function FishingAutoPerfect:DisconnectAll()
+	for _, connection in ipairs(self.Connections) do
+		pcall(function() connection:Disconnect() end)
+	end
+	table.clear(self.Connections)
+end
+
+function FishingAutoPerfect:ResetRound()
+	self.ReadyToClick = false
+	self.Clicking = false
+	self.WaitingFeedback = false
+	self.MinigameVisible = false
+	self.MinigameStartedAt = 0
+	self.InitialDashRotation = 0
+	self.DashStartedMoving = false
+	self.LastClickAt = 0
+end
+
+function FishingAutoPerfect:IsVisible(object)
+	local playerGui = player:FindFirstChildOfClass("PlayerGui")
+	local current = object
+	while current and current ~= playerGui do
+		if current:IsA("GuiObject") and not current.Visible then return false end
+		current = current.Parent
+	end
+	return playerGui ~= nil and current == playerGui
+end
+
+function FishingAutoPerfect:FindUI()
+	local playerGui = player:FindFirstChildOfClass("PlayerGui")
+	local system = playerGui and playerGui:FindFirstChild("System")
+	local minigame = system and system:FindFirstChild("MINIGAME")
+	local fishing = minigame and minigame:FindFirstChild("MiniGameFishing")
+	local ring = fishing and fishing:FindFirstChild("ImageLabel")
+	local dash = ring and ring:FindFirstChild("dash")
+	local target = ring and ring:FindFirstChild("target")
+	if not ring or not dash or not target then return nil end
+	if not self:IsVisible(ring) or ring.AbsoluteSize.X <= 0 or ring.AbsoluteSize.Y <= 0 then return nil end
+	return ring, dash, target
+end
+
+function FishingAutoPerfect:Click(ring)
+	if not self.Enabled or self.Clicking or self.WaitingFeedback then return end
+	self.Clicking = true
+	self.ReadyToClick = false
+	self.WaitingFeedback = true
+	self.LastClickAt = os.clock()
+	local id = self.RunId
+	task.spawn(function()
+		if not self.Enabled or self.RunId ~= id then return end
+		local position = ring.AbsolutePosition + ring.AbsoluteSize / 2
+		local sent = pcall(function()
+			VIM:SendMouseButtonEvent(position.X, position.Y, 0, true, game, 0)
+			task.wait()
+			VIM:SendMouseButtonEvent(position.X, position.Y, 0, false, game, 0)
+		end)
+		if not sent then
+			pcall(function()
+				VirtualUser:CaptureController()
+				VirtualUser:ClickButton1(position)
+			end)
+		end
+		if self.RunId == id then self.Clicking = false end
+	end)
+end
+
+function FishingAutoPerfect:Render()
+	if not self.Enabled then return end
+	local ring, dash, target = self:FindUI()
+	if not ring then
+		if self.MinigameVisible then self:ResetRound() end
+		return
+	end
+
+	if not self.MinigameVisible then
+		self.MinigameVisible = true
+		self.ReadyToClick = false
+		self.Clicking = false
+		self.WaitingFeedback = false
+		self.MinigameStartedAt = os.clock()
+		self.InitialDashRotation = dash.Rotation
+		self.DashStartedMoving = false
+	end
+
+	local function angleDistance(first, second)
+		return math.abs(((first - second + 180) % 360) - 180)
+	end
+
+	if not self.DashStartedMoving then
+		local elapsed = os.clock() - self.MinigameStartedAt
+		local moved = angleDistance(dash.Rotation, self.InitialDashRotation)
+		if elapsed >= 0.05 and moved >= 1.5 then
+			self.DashStartedMoving = true
+			self.ReadyToClick = true
+		else
+			return
+		end
+	end
+
+	if self.WaitingFeedback and not self.Clicking and os.clock() - self.LastClickAt >= 0.75 then
+		self.WaitingFeedback = false
+		self.ReadyToClick = true
+	end
+
+	if self.ReadyToClick and not self.Clicking and not self.WaitingFeedback then
+		if angleDistance(dash.Rotation, target.Rotation) <= self.Tolerance then
+			self:Click(ring)
+		end
+	end
+end
+
+function FishingAutoPerfect:Start()
+	if self.Enabled then return true end
+	local solf = ReplicatedStorage:FindFirstChild("RemoteEvent_Solf")
+	local eventA = solf and solf:FindFirstChild("RemoteEventA")
+	local fish = eventA and eventA:FindFirstChild("Fish")
+	local feedback = fish and fish:FindFirstChild("MiniGameFeedback")
+	local fishingEvent = fish and fish:FindFirstChild("FishingEvent")
+	if not feedback or not fishingEvent then return false end
+
+	self:DisconnectAll()
+	self.RunId += 1
+	self.Enabled = true
+	self:ResetRound()
+	local id = self.RunId
+
+	self.Connections[#self.Connections + 1] = RunService.RenderStepped:Connect(function()
+		self:Render()
+	end)
+	self.Connections[#self.Connections + 1] = feedback.OnClientEvent:Connect(function(payload)
+		if not self.Enabled or type(payload) ~= "table" then return end
+		self.WaitingFeedback = false
+		if payload.hit == true then
+			if payload.final == true then
+				self.ReadyToClick = false
+			else
+				task.delay(0.08, function()
+					if self.Enabled and self.RunId == id and self.MinigameVisible then
+						self.ReadyToClick = true
+					end
+				end)
+			end
+		else
+			task.delay(0.15, function()
+				if self.Enabled and self.RunId == id and self.MinigameVisible then
+					self.ReadyToClick = true
+				end
+			end)
+		end
+	end)
+	self.Connections[#self.Connections + 1] = fishingEvent.OnClientEvent:Connect(function(action)
+		if action == "FinishFishing" or action == "Canceled" then self:ResetRound() end
+	end)
+	return true
+end
+
+function FishingAutoPerfect:Stop()
+	self.Enabled = false
+	self.RunId += 1
+	self:DisconnectAll()
+	self:ResetRound()
+end
+
 getgenv().AraiSpectate = Spectate
 getgenv().AraiGPS = GPS
 getgenv().AraiInvisible = Invisible
 getgenv().AraiAntiAFK = AntiAFK
+getgenv().AraiFishingAutoPerfect = FishingAutoPerfect
+getgenv().FishingAutoPerfect = FishingAutoPerfect
 
 Farm.ESP = ESP
 Farm.Spectate = Spectate
 Farm.GPS = GPS
 Farm.Invisible = Invisible
 Farm.AntiAFK = AntiAFK
+Farm.FishingAutoPerfect = FishingAutoPerfect
 getgenv().AraiESP = ESP
 
 local Window = Library:Window({ Name="A-RAI HUB | Never Town", Game="Never Town" })
 local FarmPage = Window:CreatePage({ Name="FARM" })
 local Controls = FarmPage:CreateSection({ Name="AUTOMATION", Side=1, Collapsed=false })
+local FishingControls = FarmPage:CreateSection({ Name="FISHING", Side=1, Collapsed=false })
 local Monitor = FarmPage:CreateSection({ Name="FARM STATUS", Side=2, Collapsed=false })
 
 local PlayerPage = Window:CreatePage({ Name="PLAYER" })
@@ -2448,6 +2644,20 @@ Controls:Slider({ Name="Server Cooldown", Flag="AraiCandyCooldown", Min=20, Max=
 	Callback=function(value) Farm.Settings.Cooldown=math.floor(value) end })
 Controls:Slider({ Name="Teleport Y Offset", Flag="AraiCandyYOffset", Min=0, Max=8, Default=0, Suffix=" studs", Compact=true,
 	Callback=function(value) Farm.Settings.YOffset=value end })
+
+local fishingToggle
+fishingToggle = FishingControls:Toggle({ Name="Auto Perfect", Flag="AraiFishingAutoPerfectEnabled", Default=false,
+	Callback=function(value)
+		if value then
+			if not FishingAutoPerfect:Start() then
+				task.defer(function()
+					if fishingToggle then fishingToggle:SetValue(false, true) end
+				end)
+			end
+		else
+			FishingAutoPerfect:Stop()
+		end
+	end })
 
 SpectateControls:Slider({ Name="Spectate Range", Flag="AraiSpectateRange", Min=50, Max=1500, Default=500, Suffix=" studs", Compact=true,
 	Callback=function(value)
@@ -2550,6 +2760,7 @@ local antiAFKToggle = DeviceSettings:Toggle({ Name="Anti AFK", Flag="AraiAntiAFK
 local baseLibraryUnload = Library.Unload
 function Library:Unload(...)
 	AntiAFK:Stop()
+	FishingAutoPerfect:Stop()
 	Invisible:Stop(true)
 	Spectate:Shutdown()
 	GPS:Stop()
