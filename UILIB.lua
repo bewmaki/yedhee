@@ -54,7 +54,11 @@ local TeleportService = svc("TeleportService")
 local GuiService = svc("GuiService")
 
 local LocalPlayer = safe_cloneref(Players.LocalPlayer)
-local IsMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local platform_ok, current_platform = pcall(function() return UserInputService:GetPlatform() end)
+local mobile_platform = platform_ok and (current_platform == Enum.Platform.Android or current_platform == Enum.Platform.IOS)
+local IsMobile = getgenv().SolixForceMobile == true
+	or mobile_platform
+	or (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
 local Mouse = safe_cloneref(LocalPlayer and LocalPlayer:GetMouse())
 
 local get_mouse_location = LPH_NO_VIRTUALIZE(function()

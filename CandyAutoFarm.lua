@@ -5,8 +5,14 @@ local Players = game:GetService("Players")
 local VIM = game:GetService("VirtualInputManager")
 local VirtualUser = game:GetService("VirtualUser")
 local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local player = Players.LocalPlayer
+local platformOk, platform = pcall(function() return UserInputService:GetPlatform() end)
+local mobilePlatform = platformOk and (platform == Enum.Platform.Android or platform == Enum.Platform.IOS)
+local IS_MOBILE = getgenv().SolixForceMobile == true
+	or mobilePlatform
+	or (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
 
 local Library = getgenv().Library
 if not Library then
@@ -158,8 +164,57 @@ local function key(code, hold)
 	VIM:SendKeyEvent(false, code, false, game)
 end
 
+local function touchGui(gui)
+	if not gui or not gui:IsA("GuiObject") then return false end
+	local point = gui.AbsolutePosition + gui.AbsoluteSize / 2
+	local ok = pcall(function()
+		VIM:SendTouchEvent(0, Enum.UserInputState.Begin, point.X, point.Y)
+		task.wait(0.08)
+		VIM:SendTouchEvent(0, Enum.UserInputState.End, point.X, point.Y)
+	end)
+	if ok then return true end
+
+	-- Executors without SendTouchEvent can still invoke the unified mobile
+	-- GuiButton event without needing a mouse or keyboard.
+	if gui:IsA("GuiButton") and type(firesignal) == "function" then
+		return pcall(function() firesignal(gui.Activated) end)
+	end
+	return false
+end
+
+local function activateGuiDirect(gui)
+	if not gui or not gui:IsA("GuiObject") then return false end
+	if gui:IsA("GuiButton") and type(getconnections) == "function" then
+		for _, signalName in ipairs({ "Activated", "MouseButton1Click", "TouchTap" }) do
+			local ok, connections = pcall(getconnections, gui[signalName])
+			if ok and type(connections) == "table" and #connections > 0 then
+				local invoked = false
+				for _, connection in ipairs(connections) do
+					local fired = pcall(function()
+						if type(connection.Fire) == "function" then
+							connection:Fire()
+						elseif type(connection.Function) == "function" then
+							connection.Function()
+						else
+							error("unsupported connection")
+						end
+					end)
+					invoked = invoked or fired
+				end
+				if invoked then return true end
+			end
+		end
+	end
+	if gui:IsA("GuiButton") and type(firesignal) == "function" then
+		local ok = pcall(function() firesignal(gui.MouseButton1Click) end)
+		if ok then return true end
+	end
+	return touchGui(gui)
+end
+
 local function click(gui)
 	if not gui or not gui:IsA("GuiObject") then return false end
+	if IS_MOBILE then return activateGuiDirect(gui) end
 	-- Use a real pointer click for game-owned UI. Some executors return success
 	-- from firesignal without Roblox's crafting controller receiving the action.
 	local point = gui.AbsolutePosition + gui.AbsoluteSize / 2
@@ -180,13 +235,18 @@ local function clickAndConfirm(gui, confirm, id, confirmWait)
 	local methods = {
 		function() click(gui) end,
 		function()
+			if IS_MOBILE then return end
 			-- Selectable=true in the focused dump, so keyboard activation can
 			-- reach the controller even when pointer injection is blocked.
 			GuiService.SelectedObject = gui
 			key(Enum.KeyCode.Return, 0.08)
 		end,
 		function()
-			VirtualUser:ClickButton1(point, camera and camera.CFrame or CFrame.new())
+			if IS_MOBILE then
+				touchGui(gui)
+			else
+				VirtualUser:ClickButton1(point, camera and camera.CFrame or CFrame.new())
+			end
 		end,
 	}
 
@@ -269,6 +329,15 @@ local function interact(point, id)
 	if prompt and type(fireproximityprompt) == "function" and pcall(fireproximityprompt, prompt, prompt.HoldDuration) then
 		return waitActive(0.5, id)
 	end
+	if prompt and IS_MOBILE then
+		local began = pcall(function() prompt:InputHoldBegin() end)
+		if began then
+			if not waitActive(math.max(0.1, prompt.HoldDuration), id) then return false end
+			pcall(function() prompt:InputHoldEnd() end)
+			return waitActive(0.5, id)
+		end
+		return false
+	end
 	key(Enum.KeyCode.E, 1.1)
 	return waitActive(0.5, id)
 end
@@ -319,7 +388,7 @@ local function itemCount(root, itemName)
 	return 0, false, true
 end
 
-local function inventoryPanel()
+local function inventoryPanel(allowHidden)
 	local gui = player:FindFirstChildOfClass("PlayerGui")
 
 	-- Current Some Town inventory:
@@ -328,7 +397,7 @@ local function inventoryPanel()
 	local canvas = inventory and inventory:FindFirstChild("CanvasGroup")
 	local modernMain = canvas and canvas:FindFirstChild("Main")
 	local modernBody = modernMain and modernMain:FindFirstChild("Body")
-	if modernBody and modernBody:IsA("ScrollingFrame") and visible(modernBody) then
+	if modernBody and modernBody:IsA("ScrollingFrame") and (allowHidden or visible(modernBody)) then
 		return modernBody, "modern"
 	end
 
@@ -387,19 +456,63 @@ local function selectModernInventoryAll()
 	return false
 end
 
+local function findMobileInventoryButton()
+	local gui = player:FindFirstChildOfClass("PlayerGui")
+	if not gui then return nil end
+	local best, bestScore
+	for _, object in ipairs(gui:GetDescendants()) do
+		if object:IsA("GuiButton") and visible(object) then
+			local text = object:IsA("TextButton") and object.Text or ""
+			for _, child in ipairs(object:GetDescendants()) do
+				if child:IsA("TextLabel") then text ..= " " .. child.Text end
+			end
+			local haystack = string.lower(object.Name .. " " .. text):gsub("<.->", "")
+			local score = 0
+			if haystack:find("inventory", 1, true) then score = 4
+			elseif haystack:find("backpack", 1, true) then score = 3
+			elseif haystack:match("%f[%a]bag%f[%A]") then score = 2 end
+			if object:FindFirstAncestor("Inventory") then score -= 1 end
+			if score > 0 and (not bestScore or score > bestScore) then
+				best, bestScore = object, score
+			end
+		end
+	end
+	return best
+end
+
 local function scanInventory(id)
 	stage(2)
-	local opened = inventoryPanel() == nil
-	if opened then key(Enum.KeyCode.T) end
-	local panel = waitFor(function()
-		local root = inventoryPanel()
-		return root
-	end, 5, id)
+	local panel, mode = inventoryPanel()
+	local opened = false
+	local mobileInventoryButton
+	if not panel and IS_MOBILE then
+		-- Mobile has no T key. The custom inventory keeps its item cards loaded
+		-- under CanvasGroup even while the full panel is hidden.
+		panel, mode = inventoryPanel(true)
+	end
+	if not panel then
+		opened = true
+		if IS_MOBILE then
+			mobileInventoryButton = findMobileInventoryButton()
+			if not mobileInventoryButton or not activateGuiDirect(mobileInventoryButton) then return false end
+		else
+			key(Enum.KeyCode.T)
+		end
+		panel = waitFor(function()
+			local root = inventoryPanel()
+			return root
+		end, 5, id)
+	end
 	if not panel then return false end
-	local _, mode = inventoryPanel()
+	if not mode then
+		local _, detectedMode = inventoryPanel(true)
+		mode = detectedMode
+	end
 	if mode == "modern" then
-		selectModernInventoryAll()
-		if not waitActive(0.5, id) then return false end
+		if visible(panel) then
+			selectModernInventoryAll()
+			if not waitActive(0.5, id) then return false end
+		end
 	end
 	if not waitInventoryCards(panel, id) then return false end
 	if not waitActive(0.5, id) then return false end
@@ -415,7 +528,9 @@ local function scanInventory(id)
 			end
 			if invalid then
 				updateStatus("Invalid Amount: " .. crop[1])
-				if opened and inventoryPanel() then key(Enum.KeyCode.T) end
+				if opened and inventoryPanel() then
+					if IS_MOBILE and mobileInventoryButton then activateGuiDirect(mobileInventoryButton) else key(Enum.KeyCode.T) end
+				end
 				return false
 			end
 			if found then observed[crop[1]] = math.max(observed[crop[1]] or 0, count) end
@@ -427,7 +542,10 @@ local function scanInventory(id)
 	-- populated modern inventory mean a real zero, not "GUI still loading".
 	for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = observed[crop[1]] or 0 end
 	updateStatus("Inventory checked: " .. (mode or "unknown"))
-	if opened and inventoryPanel() then key(Enum.KeyCode.T); waitActive(0.3, id) end
+	if opened and inventoryPanel() then
+		if IS_MOBILE and mobileInventoryButton then activateGuiDirect(mobileInventoryButton) else key(Enum.KeyCode.T) end
+		waitActive(0.3, id)
+	end
 	return active(id)
 end
 
@@ -488,7 +606,17 @@ end
 
 local function closeGui(bg)
 	local exit = bg and (bg:FindFirstChild("Exit") or exact(bg, "Exit") or exact(bg, "Close"))
-	if exit then click(exit) else key(Enum.KeyCode.Escape) end
+	if exit then
+		click(exit)
+		if IS_MOBILE then
+			task.wait(0.15)
+			if visible(bg) and exit:IsA("GuiButton") and type(firesignal) == "function" then
+				pcall(function() firesignal(exit.Activated) end)
+			end
+		end
+	elseif not IS_MOBILE then
+		key(Enum.KeyCode.Escape)
+	end
 end
 
 local function craftUI()
@@ -725,7 +853,11 @@ local function deposit(id)
 	if not seed then closeGui(ui); return false end
 	local card = seed
 	while card.Parent and card.Parent ~= inventory and not card:IsA("GuiButton") do card = card.Parent end
-	click(card); waitActive(0.85, id)
+	if not clickAndConfirm(card, function()
+		return exact(inventory, "SeedCandy") == nil
+	end, id, 1.0) then
+		closeGui(ui); return false
+	end
 	local removed = exact(inventory, "SeedCandy") == nil
 	closeGui(ui); return removed and active(id)
 end
@@ -887,7 +1019,19 @@ local SLOT_KEYS = {
 	[7]=Enum.KeyCode.Seven, [8]=Enum.KeyCode.Eight, [9]=Enum.KeyCode.Nine,
 }
 
+local function hotbarSlotObject(slot)
+	local gui = player:FindFirstChildOfClass("PlayerGui")
+	local inventory = gui and gui:FindFirstChild("Inventory")
+	local uiList = inventory and inventory:FindFirstChild("UIList")
+	local slots = uiList and uiList:FindFirstChild("Slot")
+	return slots and slots:FindFirstChild("Slot" .. tostring(slot)) or nil, slots ~= nil
+end
+
 local function pressSlot(slot)
+	if IS_MOBILE then
+		local slotObject = hotbarSlotObject(slot)
+		return slotObject ~= nil and visible(slotObject) and activateGuiDirect(slotObject)
+	end
 	local code = SLOT_KEYS[slot]
 	if not code then return false end
 	key(code, 0.08)
@@ -909,12 +1053,8 @@ local function consumeGuiBusy()
 end
 
 local function hotbarSlotReady(slot)
-	local gui = player:FindFirstChildOfClass("PlayerGui")
-	local inventory = gui and gui:FindFirstChild("Inventory")
-	local uiList = inventory and inventory:FindFirstChild("UIList")
-	local slots = uiList and uiList:FindFirstChild("Slot")
-	if not slots then return true end -- Unknown layout: let the key/check flow decide.
-	local slotObject = slots:FindFirstChild("Slot" .. tostring(slot))
+	local slotObject, layoutKnown = hotbarSlotObject(slot)
+	if not layoutKnown then return true end -- Unknown layout: let the key/check flow decide.
 	return slotObject ~= nil and visible(slotObject)
 end
 
@@ -1041,10 +1181,11 @@ Survival:Slider({ Name="Eat Below", Flag="SolixHungerThreshold", Min=10, Max=90,
 	Callback=function(value) Consume.HungerThreshold=math.floor(value); updateConsumeUI() end })
 Survival:Slider({ Name="Drink Below", Flag="SolixThirstThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
 	Callback=function(value) Consume.ThirstThreshold=math.floor(value); updateConsumeUI() end })
-Survival:Label({ Name="Food: slot 6", Description="Put Curry/rice food in hotbar slot 6" })
-Survival:Label({ Name="Water: slot 7", Description="Put the drink item in hotbar slot 7" })
+Survival:Label({ Name="Food: slot 6", Description=IS_MOBILE and "Mobile: taps hotbar slot 6" or "PC: presses top-row 6" })
+Survival:Label({ Name="Water: slot 7", Description=IS_MOBILE and "Mobile: taps hotbar slot 7" or "PC: presses top-row 7" })
 
 statusLabel = Monitor:Label("Status: Idle")
+Monitor:Label({ Name=IS_MOBILE and "Device: Mobile Touch" or "Device: PC Keyboard", Description="Input mode detected automatically" })
 consumeStatusLabel = Monitor:Label({ Name="Consume: Disabled", Description="Auto Eat / Drink state" })
 hungerLabel = Monitor:Label({ Name="Hunger: Unknown | eat below 30%", Description="PlayerGui/Status/Main/Status/Hunger/Bar" })
 thirstLabel = Monitor:Label({ Name="Thirst: Unknown | drink below 30%", Description="PlayerGui/Status/Main/Status/Thirsty/Bar" })
