@@ -2352,9 +2352,8 @@ function Library:EnsureFolders()
 	end
 end
 
--- A-RAI HUB uses a code-drawn RAI mark, so opening the UI never depends on
--- an external logo download. These remain available for custom integrations.
-Library.LogoUrl = ""
+-- Lightning RAI wordmark published with the A-RAI HUB loader.
+Library.LogoUrl = "https://raw.githubusercontent.com/bewmaki/yedhee/main/assets/brand/rai-lightning.png"
 Library.LogoFallback = ""
 
 function Library:GetLogoAsset()
@@ -2747,33 +2746,23 @@ do
 			Theme = { ImageColor3 = "Shadow" },
 		})
 
-		UI.Logo = Draw:Create("Frame", {
+		UI.Logo = Draw:Create("ImageLabel", {
 			Parent = UI.MainFrame,
-			Size = UDim2New(0, 30, 0, 20),
-			Position = UDim2New(0, 7, 0, 5),
-			BackgroundColor3 = BRAND_PURPLE,
-			BorderSizePixel = 0,
+			Size = UDim2New(0, 40, 0, 24),
+			Position = UDim2New(0, 6, 0, 3),
+			BackgroundTransparency = 1,
+			Image = "",
+			ImageRectOffset = Vector2New(20, 190),
+			ImageRectSize = Vector2New(1210, 730),
+			ScaleType = Enum.ScaleType.Fit,
 			ZIndex = 4,
 		})
-		corner(UI.Logo, 6)
-		Draw:Create("UIGradient", {
-			Parent = UI.Logo,
-			Color = CSNew({ CSK(0, BRAND_PURPLE_LIGHT), CSK(1, BRAND_PURPLE_DARK) }),
-			Rotation = 35,
-		})
-		Draw:Create("UIStroke", {
-			Parent = UI.Logo, Color = BRAND_PURPLE_LIGHT, Thickness = 1, Transparency = 0.18,
-		})
-		Draw:Create("TextLabel", {
-			Parent = UI.Logo, Size = UDim2New(1, 0, 1, 0), BackgroundTransparency = 1,
-			Text = "RAI", TextColor3 = FromRGB(255, 255, 255), TextSize = 11,
-			FontFace = Menu.Font, ZIndex = 5,
-		})
+		Library:ApplyLogoImage(UI.Logo)
 
 		UI.Title = Draw:Create("TextLabel", {
 			Parent = UI.MainFrame,
 			Size = UDim2New(0, 0, 0, 15),
-			Position = UDim2New(0, 43, 0, 8),
+			Position = UDim2New(0, 51, 0, 8),
 			BackgroundTransparency = 1,
 			Text = self.Name,
 			TextColor3 = Menu.Theme.Text,
@@ -9360,7 +9349,7 @@ function Library:CreateFloatingButton(window)
 		Size = UDim2New(0, btn_size, 0, btn_size),
 		Position = UDim2New(default_sx, default_x, default_sy, default_y),
 		BackgroundColor3 = BRAND_PURPLE,
-		Text = "RAI",
+		Text = "",
 		TextColor3 = FromRGB(255, 255, 255),
 		TextSize = IsMobile and 20 or 15,
 		FontFace = Menu.Font,
@@ -9377,6 +9366,19 @@ function Library:CreateFloatingButton(window)
 	Draw:Create("UIStroke", {
 		Parent = btn, Color = BRAND_PURPLE_LIGHT, Thickness = IsMobile and 2 or 1.5, Transparency = 0.12,
 	})
+	local floating_logo = Draw:Create("ImageLabel", {
+		Parent = btn,
+		Size = UDim2New(0.88, 0, 0.52, 0),
+		Position = UDim2New(0.5, 0, 0.5, 0),
+		AnchorPoint = Vector2New(0.5, 0.5),
+		BackgroundTransparency = 1,
+		Image = "",
+		ImageRectOffset = Vector2New(20, 190),
+		ImageRectSize = Vector2New(1210, 730),
+		ScaleType = Enum.ScaleType.Fit,
+		ZIndex = 129,
+	})
+	Library:ApplyLogoImage(floating_logo)
 
 	local pos = Menu.Flags.FloatingButtonPosition or self.FloatingButtonPosition
 	if type(pos) == "table" and pos.X and pos.Y then
