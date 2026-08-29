@@ -1176,11 +1176,13 @@ local ESP = {
 	ShowDistance = true,
 	ShowHealth = true,
 	ShowArmor = true,
+	ShowBox = true,
 	MaxDistance = 1000,
 	Objects = {},
 	Connection = nil,
 	Accumulator = 0,
-	UpdateInterval = IS_MOBILE and 0.15 or 0.1,
+	UpdateInterval = IS_MOBILE and 0.18 or 0.12,
+	StatsInterval = IS_MOBILE and 0.6 or 0.4,
 	ProxyCharacters = {},
 	NextProxyScan = {},
 	RootGui = nil,
@@ -1233,7 +1235,7 @@ end
 function ESP:ResolveWorkspaceProxy(target, force)
 	if not target then return nil end
 	local cached = self.ProxyCharacters[target]
-	if cached and cached.Parent and usableCharacter(cached) then return cached end
+	if cached and cached.Parent then return cached end
 
 	local now = os.clock()
 	if not force and now < (self.NextProxyScan[target] or 0) then return nil end
@@ -1255,7 +1257,7 @@ end
 local function resolvePlayerCharacter(target)
 	if not target then return nil end
 	if typeof(target) == "Instance" and target:IsA("Model") then
-		return usableCharacter(target) and target or nil
+		return target.Parent and target or nil
 	end
 	-- Match Never Town external cache order: the live Workspace proxy wins over
 	-- Player.Character. At close range Player.Character may become a usable but
@@ -1273,29 +1275,34 @@ local function addCorner(instance, radius)
 	corner.Parent = instance
 end
 
-local function makeESPBar(parent, y, color)
+local function makeVerticalESPBar(parent, color, leftSide)
 	local back = Instance.new("Frame")
 	back.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
-	back.BackgroundTransparency = 0.12
+	back.BackgroundTransparency = 0.08
 	back.BorderSizePixel = 0
-	back.Position = UDim2.fromOffset(10, y)
-	back.Size = UDim2.new(1, -20, 0, 8)
+	back.Position = UDim2.fromOffset(leftSide and -9 or 0, 0)
+	back.Size = UDim2.fromOffset(IS_MOBILE and 7 or 5, 60)
 	back.Parent = parent
-	addCorner(back, 4)
+	addCorner(back, 3)
 
 	local fill = Instance.new("Frame")
 	fill.BackgroundColor3 = color
 	fill.BorderSizePixel = 0
+	fill.AnchorPoint = Vector2.new(0, 1)
+	fill.Position = UDim2.fromScale(0, 1)
 	fill.Size = UDim2.fromScale(1, 1)
 	fill.Parent = back
-	addCorner(fill, 4)
+	addCorner(fill, 3)
 
 	local text = Instance.new("TextLabel")
 	text.BackgroundTransparency = 1
-	text.Size = UDim2.fromScale(1, 1)
+	text.AnchorPoint = Vector2.new(leftSide and 1 or 0, 0)
+	text.Position = UDim2.new(leftSide and 0 or 1, leftSide and -3 or 3, 0, 0)
+	text.Size = UDim2.fromOffset(IS_MOBILE and 48 or 42, IS_MOBILE and 17 or 14)
 	text.Font = Enum.Font.GothamBold
 	text.TextColor3 = Color3.fromRGB(255, 255, 255)
-	text.TextSize = 9
+	text.TextSize = IS_MOBILE and 11 or 9
+	text.TextXAlignment = leftSide and Enum.TextXAlignment.Right or Enum.TextXAlignment.Left
 	text.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
 	text.TextStrokeTransparency = 0.25
 	text.ZIndex = 3
@@ -1328,51 +1335,70 @@ function ESP:EnsureRootGui()
 	return gui
 end
 
-function ESP:CreatePlayer(target, adornee)
+function ESP:CreatePlayer(target)
 	self:DestroyPlayer(target)
 	local gui = Instance.new("Frame")
 	gui.Name = "AraiPlayerESP"
-	gui.Size = UDim2.fromOffset(170, 62)
-	gui.AnchorPoint = Vector2.new(0.5, 1)
+	gui.Size = UDim2.fromOffset(55, 100)
+	gui.AnchorPoint = Vector2.new(0, 0)
 	gui.BackgroundTransparency = 1
 	gui.Visible = false
 	gui.ZIndex = 20
 	gui.Parent = self:EnsureRootGui()
 
+	local box = Instance.new("Frame")
+	box.Name = "Box"
+	box.BackgroundTransparency = 1
+	box.Size = UDim2.fromScale(1, 1)
+	box.Parent = gui
+	local boxStroke = Instance.new("UIStroke")
+	boxStroke.Color = Color3.fromRGB(205, 170, 255)
+	boxStroke.Thickness = IS_MOBILE and 2 or 1.5
+	boxStroke.Transparency = 0.05
+	boxStroke.Parent = box
+
 	local name = Instance.new("TextLabel")
 	name.BackgroundTransparency = 1
-	name.Size = UDim2.new(1, 0, 0, 16)
+	name.AnchorPoint = Vector2.new(0.5, 1)
+	name.Position = UDim2.new(0.5, 0, 0, -3)
+	name.Size = UDim2.fromOffset(IS_MOBILE and 210 or 180, IS_MOBILE and 19 or 16)
 	name.Font = Enum.Font.GothamBold
 	name.TextColor3 = Color3.fromRGB(255, 255, 255)
-	name.TextSize = 13
+	name.TextSize = IS_MOBILE and 14 or 12
 	name.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
 	name.TextStrokeTransparency = 0.15
 	name.Parent = gui
 
 	local distance = Instance.new("TextLabel")
 	distance.BackgroundTransparency = 1
-	distance.Position = UDim2.fromOffset(0, 15)
-	distance.Size = UDim2.new(1, 0, 0, 13)
+	distance.AnchorPoint = Vector2.new(0.5, 0)
+	distance.Position = UDim2.new(0.5, 0, 1, 3)
+	distance.Size = UDim2.fromOffset(100, IS_MOBILE and 17 or 14)
 	distance.Font = Enum.Font.GothamSemibold
 	distance.TextColor3 = Color3.fromRGB(205, 170, 255)
-	distance.TextSize = 11
+	distance.TextSize = IS_MOBILE and 12 or 10
 	distance.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
 	distance.TextStrokeTransparency = 0.2
 	distance.Parent = gui
 
-	local healthBack, healthFill, healthText = makeESPBar(gui, 31, Color3.fromRGB(72, 235, 112))
-	local armorBack, armorFill, armorText = makeESPBar(gui, 44, Color3.fromRGB(116, 91, 255))
+	local healthBack, healthFill, healthText = makeVerticalESPBar(gui, Color3.fromRGB(72, 235, 112), true)
+	local armorBack, armorFill, armorText = makeVerticalESPBar(gui, Color3.fromRGB(116, 91, 255), false)
 	local object = {
-		Gui = gui, Name = name, Distance = distance,
+		Gui = gui, Box = box, BoxStroke = boxStroke, Name = name, Distance = distance,
 		HealthBack = healthBack, HealthFill = healthFill, HealthText = healthText,
 		ArmorBack = armorBack, ArmorFill = armorFill, ArmorText = armorText,
+		NextStatsUpdate = 0,
 	}
 	self.Objects[target] = object
 	return object
 end
 
-function ESP:GetArmor(target, character, humanoid)
-	local dumpedArmor = character and character:FindFirstChild("AmmorHeal")
+function ESP:GetArmor(target, character, humanoid, object)
+	local dumpedArmor = object and object.ArmorValue
+	if not dumpedArmor or dumpedArmor.Parent ~= character then
+		dumpedArmor = character and character:FindFirstChild("AmmorHeal")
+		if object then object.ArmorValue = dumpedArmor end
+	end
 	if dumpedArmor then
 		local valueOk, value = pcall(function() return dumpedArmor.Value end)
 		if valueOk and type(value) == "number" then
@@ -1389,87 +1415,112 @@ function ESP:GetArmor(target, character, humanoid)
 	return math.clamp(armor, 0, maximum), maximum
 end
 
-local function projectESPPoint(camera, root, adornee, cameraDistance)
-	-- Close mode must run before W2S. Around Never Town's 25-stud streaming
-	-- boundary the old proxy can still return a positive but unusable projection.
-	if cameraDistance <= 30 then
-		local viewport = camera.ViewportSize
-		local closePoint = camera:WorldToViewportPoint(root.Position + Vector3.new(0, 2.4, 0))
-		if closePoint.Z > 0.05 and closePoint.X == closePoint.X and closePoint.Y == closePoint.Y then
-			return closePoint
-		end
-		return Vector3.new(viewport.X * 0.5, viewport.Y * 0.42, 0.05)
+local function projectESPBox(camera, root, cameraDistance)
+	local viewport = camera.ViewportSize
+	local top = camera:WorldToViewportPoint(root.Position + Vector3.new(0, 3.2, 0))
+	local bottom = camera:WorldToViewportPoint(root.Position - Vector3.new(0, 3.4, 0))
+	local centre = camera:WorldToViewportPoint(root.Position)
+	local centreX, centreY, height
+
+	if top.Z > 0.05 and bottom.Z > 0.05 then
+		height = math.abs(bottom.Y - top.Y)
+		centreX = (top.X + bottom.X) * 0.5
+		centreY = (top.Y + bottom.Y) * 0.5
 	end
-	local candidates = {
-		adornee and (adornee.Position + Vector3.new(0, 0.75, 0)),
-		adornee and adornee.Position,
-		root and (root.Position + Vector3.new(0, 2.4, 0)),
-		root and root.Position,
-	}
-	for _, worldPoint in ipairs(candidates) do
-		if worldPoint then
-			local point = camera:WorldToViewportPoint(worldPoint)
-			if point.Z > 0.05 then return point end
+	if not height or height < 12 or height ~= height then
+		height = math.clamp(1800 / math.max(cameraDistance, 1), IS_MOBILE and 58 or 45, viewport.Y * 0.82)
+		if centre.Z > 0.05 then
+			centreX, centreY = centre.X, centre.Y
+		elseif cameraDistance <= 32 then
+			centreX, centreY = viewport.X * 0.5, viewport.Y * 0.48
+		else
+			return nil
 		end
 	end
 
-	-- When the camera clips into a nearby character every centre point may be
-	-- behind the near plane although the body is still visible. Keep its ESP
-	-- at screen centre instead of blinking off.
-	return nil
+	height = math.clamp(height, IS_MOBILE and 58 or 45, viewport.Y * 0.82)
+	local width = math.clamp(height * 0.56, IS_MOBILE and 36 or 30, viewport.X * 0.35)
+	local sideMargin = IS_MOBILE and 68 or 55
+	local topMargin = IS_MOBILE and 30 or 24
+	local left = math.clamp(centreX - width * 0.5, sideMargin, math.max(sideMargin, viewport.X - width - sideMargin))
+	local y = math.clamp(centreY - height * 0.5, topMargin, math.max(topMargin, viewport.Y - height - topMargin))
+	return left, y, width, height
 end
 
 function ESP:RefreshPlayer(target, localRoot)
 	if target == player then return end
 	local character = resolvePlayerCharacter(target)
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	local root = findCharacterRoot(character)
-	local adornee = character and (character:FindFirstChild("Head") or root)
-	if not humanoid or not root or not adornee or humanoid.Health <= 0 then
-		local stale = self.Objects[target]
+	local object = self.Objects[target]
+	local humanoid, root
+	if object and object.Character == character
+		and object.Humanoid and object.Humanoid.Parent == character
+		and object.Root and object.Root.Parent == character then
+		humanoid, root = object.Humanoid, object.Root
+	else
+		humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		root = findCharacterRoot(character)
+	end
+	if not humanoid or not root or humanoid.Health <= 0 then
+		local stale = object
 		if stale and stale.Gui then stale.Gui.Visible = false end
 		return
 	end
 
-	local object = self.Objects[target]
 	if not object or not object.Gui or not object.Gui.Parent then
-		object = self:CreatePlayer(target, adornee)
+		object = self:CreatePlayer(target)
+	end
+	if object.Character ~= character or object.Humanoid ~= humanoid or object.Root ~= root then
+		local characterChanged = object.Character ~= character
+		object.Character = character
+		object.Humanoid = humanoid
+		object.Root = root
+		if characterChanged then object.ArmorValue = nil end
+		object.NextStatsUpdate = 0
 	end
 
 	local distance = localRoot and (root.Position - localRoot.Position).Magnitude or math.huge
 	local camera = Workspace.CurrentCamera
 	local cameraDistance = camera and (root.Position - camera.CFrame.Position).Magnitude or math.huge
-	local screenPoint = camera and projectESPPoint(camera, root, adornee, cameraDistance)
-	-- Camera distance is stable even when Never Town temporarily parks the local
-	-- Player.Character proxy at a remote coordinate during streaming.
-	local onRange = self.Enabled and camera ~= nil and screenPoint ~= nil and cameraDistance <= self.MaxDistance
+	local left, top, boxWidth, boxHeight
+	if camera then left, top, boxWidth, boxHeight = projectESPBox(camera, root, cameraDistance) end
+	local onRange = self.Enabled and left ~= nil and cameraDistance <= self.MaxDistance
 	object.Gui.Visible = onRange
 	if not onRange then return character end
-	local viewport = camera.ViewportSize
-	local screenX = math.clamp(screenPoint.X, 85, math.max(85, viewport.X - 85))
-	local screenY = math.clamp(screenPoint.Y, 62, math.max(62, viewport.Y - 6))
-	object.Gui.Position = UDim2.fromOffset(screenX, screenY)
+	object.Gui.Position = UDim2.fromOffset(left, top)
+	object.Gui.Size = UDim2.fromOffset(boxWidth, boxHeight)
+	local barWidth = IS_MOBILE and 7 or 5
+	object.HealthBack.Position = UDim2.fromOffset(-barWidth - 4, 0)
+	object.HealthBack.Size = UDim2.fromOffset(barWidth, boxHeight)
+	object.ArmorBack.Position = UDim2.fromOffset(boxWidth + 4, 0)
+	object.ArmorBack.Size = UDim2.fromOffset(barWidth, boxHeight)
 
 	object.Name.Visible = self.ShowName
-	local isPlayerTarget = typeof(target) == "Instance" and target:IsA("Player")
-	local displayName = isPlayerTarget and target.DisplayName or target.Name
-	object.Name.Text = displayName ~= target.Name and (displayName .. "  @" .. target.Name) or target.Name
 	object.Distance.Visible = self.ShowDistance
-	local displayedDistance = distance < math.huge and distance or cameraDistance
-	object.Distance.Text = tostring(math.floor(displayedDistance + 0.5)) .. "m"
-
-	local maxHealth = math.max(1, humanoid.MaxHealth)
-	local health = math.clamp(humanoid.Health, 0, maxHealth)
-	local healthRatio = health / maxHealth
+	object.Box.Visible = self.ShowBox
 	object.HealthBack.Visible = self.ShowHealth
-	object.HealthFill.Size = UDim2.fromScale(healthRatio, 1)
-	object.HealthFill.BackgroundColor3 = Color3.fromRGB(math.floor(255 * (1 - healthRatio)), math.floor(220 * healthRatio + 35), 75)
-	object.HealthText.Text = string.format("HP %d%%", math.floor(healthRatio * 100 + 0.5))
-
-	local armor, maxArmor = self:GetArmor(target, character, humanoid)
 	object.ArmorBack.Visible = self.ShowArmor
-	object.ArmorFill.Size = UDim2.fromScale(armor / maxArmor, 1)
-	object.ArmorText.Text = string.format("ARMOR %d%%", math.floor((armor / maxArmor) * 100 + 0.5))
+
+	local now = os.clock()
+	if now >= (object.NextStatsUpdate or 0) then
+		object.NextStatsUpdate = now + self.StatsInterval
+		local isPlayerTarget = typeof(target) == "Instance" and target:IsA("Player")
+		local displayName = isPlayerTarget and target.DisplayName or target.Name
+		object.Name.Text = displayName ~= target.Name and (displayName .. "  @" .. target.Name) or target.Name
+		local displayedDistance = distance < math.huge and distance or cameraDistance
+		object.Distance.Text = tostring(math.floor(displayedDistance + 0.5)) .. "m"
+
+		local maxHealth = math.max(1, humanoid.MaxHealth)
+		local health = math.clamp(humanoid.Health, 0, maxHealth)
+		local healthRatio = health / maxHealth
+		object.HealthFill.Size = UDim2.fromScale(1, healthRatio)
+		object.HealthFill.BackgroundColor3 = Color3.fromRGB(math.floor(255 * (1 - healthRatio)), math.floor(220 * healthRatio + 35), 75)
+		object.HealthText.Text = string.format("HP %d%%", math.floor(healthRatio * 100 + 0.5))
+
+		local armor, maxArmor = self:GetArmor(target, character, humanoid, object)
+		local armorRatio = armor / maxArmor
+		object.ArmorFill.Size = UDim2.fromScale(1, armorRatio)
+		object.ArmorText.Text = string.format("AR %d%%", math.floor(armorRatio * 100 + 0.5))
+	end
 	return character
 end
 
@@ -1612,15 +1663,17 @@ ESPControls:Toggle({ Name="Name", Flag="AraiESPName", Default=true,
 	Callback=function(value) ESP.ShowName=value; if ESP.Enabled then ESP:RefreshAll() end end })
 ESPControls:Toggle({ Name="Distance", Flag="AraiESPDistance", Default=true,
 	Callback=function(value) ESP.ShowDistance=value; if ESP.Enabled then ESP:RefreshAll() end end })
+ESPControls:Toggle({ Name="Box", Flag="AraiESPBox", Default=true,
+	Callback=function(value) ESP.ShowBox=value; if ESP.Enabled then ESP:RefreshAll() end end })
 ESPControls:Toggle({ Name="Health", Flag="AraiESPHealth", Default=true,
 	Callback=function(value) ESP.ShowHealth=value; if ESP.Enabled then ESP:RefreshAll() end end })
 ESPControls:Toggle({ Name="Armor", Flag="AraiESPArmor", Default=true,
 	Callback=function(value) ESP.ShowArmor=value; if ESP.Enabled then ESP:RefreshAll() end end })
 ESPControls:Slider({ Name="Max Distance", Flag="AraiESPMaxDistance", Min=100, Max=5000, Default=1000, Suffix="m", Compact=true,
 	Callback=function(value) ESP.MaxDistance=math.floor(value); if ESP.Enabled then ESP:RefreshAll() end end })
-ESPInfo:Label({ Name="Name + Distance", Description="White name and purple distance above each player" })
-ESPInfo:Label({ Name="Health", Description="Dynamic green/yellow/red health bar" })
-ESPInfo:Label({ Name="Armor", Description="Reads replicated Armor, Armour, Shield or Vest values" })
+ESPInfo:Label({ Name="Box ESP", Description="Purple 2D frame follows each streamed player model" })
+ESPInfo:Label({ Name="Health", Description="Vertical HP bar on the left side of the player" })
+ESPInfo:Label({ Name="Armor", Description="Vertical armor bar on the right side of the player" })
 ESPInfo:Label({ Name="Mobile supported", Description="All ESP controls use touch-ready toggles and sliders" })
 espStatusLabel = ESPInfo:Label({ Name="ESP: OFF", Description="Live target and rendered player count" })
 
