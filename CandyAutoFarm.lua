@@ -827,12 +827,36 @@ end
 
 local function statusBarValue(name)
 	local gui = player:FindFirstChildOfClass("PlayerGui")
+	-- Legacy/text HUD used by some servers.
+	local controler = gui and gui:FindFirstChild("controler")
+	local legacyStatus = controler and controler:FindFirstChild("Status")
+	local legacyHud = legacyStatus and legacyStatus:FindFirstChild("Hud")
+	local legacyName = name == "Hunger" and "hunger" or "thirst"
+	local legacyGroup = legacyHud and legacyHud:FindFirstChild(legacyName)
+	local legacyAmount = legacyGroup and legacyGroup:FindFirstChild("Amount")
+	if legacyAmount and (legacyAmount:IsA("TextLabel") or legacyAmount:IsA("TextButton")) then
+		local value = tonumber(legacyAmount.Text:match("(%d+%.?%d*)"))
+		if value then return math.clamp(value, 0, 100) end
+	end
+
 	local statusGui = gui and gui:FindFirstChild("Status")
 	local main = statusGui and statusGui:FindFirstChild("Main")
 	local statuses = main and main:FindFirstChild("Status")
 	local group = statuses and statuses:FindFirstChild(name)
 	local bar = group and group:FindFirstChild("Bar")
-	if not bar or not bar:IsA("GuiObject") or not visible(bar) then return -1 end
+	if not group then return -1 end
+
+	-- The current HUD draws 28/26 as text inside the circular status widgets.
+	-- Prefer that authoritative value when it exists.
+	for _, object in ipairs(group:GetDescendants()) do
+		if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
+			local plain = object.Text:gsub("<.->", "")
+			local value = tonumber(plain:match("^%s*(%d+%.?%d*)%%?%s*$"))
+			if value and value >= 0 and value <= 100 then return value end
+		end
+	end
+
+	if not bar or not bar:IsA("GuiObject") then return -1 end
 	local ratio = bar.Size.Y.Scale
 	if ratio < -0.01 or ratio > 1.01 then
 		local parentHeight = group.AbsoluteSize.Y
@@ -870,23 +894,6 @@ local function pressSlot(slot)
 	return true
 end
 
-local function virtualConsumeClick(useVirtualUser)
-	local camera = Workspace.CurrentCamera
-	local viewport = camera and camera.ViewportSize or Vector2.new(1920, 1080)
-	local point = viewport / 2
-	if useVirtualUser then
-		return pcall(function()
-			VirtualUser:CaptureController()
-			VirtualUser:ClickButton1(point, camera and camera.CFrame or CFrame.new())
-		end)
-	end
-	return pcall(function()
-		VIM:SendMouseButtonEvent(point.X, point.Y, 0, true, game, 0)
-		task.wait(0.08)
-		VIM:SendMouseButtonEvent(point.X, point.Y, 0, false, game, 0)
-	end)
-end
-
 local function refreshConsumeValues()
 	Consume.Hunger = statusBarValue("Hunger")
 	Consume.Thirst = statusBarValue("Thirsty")
@@ -896,42 +903,39 @@ local function refreshConsumeValues()
 	return progressing
 end
 
-local function waitConsumeStarted(initial, statusName, seconds, id)
-	local finish = os.clock() + seconds
-	repeat
-		if not consumeActive(id) then return false end
-		local progressing = refreshConsumeValues()
-		local current = statusName == "Hunger" and Consume.Hunger or Consume.Thirst
-		if progressing or (current >= 0 and current > initial + 0.1) then return true end
-		task.wait(0.1)
-	until os.clock() >= finish
-	return false
-end
-
 local function consumeGuiBusy()
 	if Farm.Stage == 1 or Farm.Stage == 2 or Farm.Stage == 5 or Farm.Stage == 6 then return true end
 	return craftUI() ~= nil or inventoryPanel() ~= nil or lockerPanels() ~= nil
 end
 
+local function hotbarSlotReady(slot)
+	local gui = player:FindFirstChildOfClass("PlayerGui")
+	local inventory = gui and gui:FindFirstChild("Inventory")
+	local uiList = inventory and inventory:FindFirstChild("UIList")
+	local slots = uiList and uiList:FindFirstChild("Slot")
+	if not slots then return true end -- Unknown layout: let the key/check flow decide.
+	local slotObject = slots:FindFirstChild("Slot" .. tostring(slot))
+	return slotObject ~= nil and visible(slotObject)
+end
+
 local function consumeSlot(slot, statusName, id)
 	local initial = statusName == "Hunger" and Consume.Hunger or Consume.Thirst
 	if initial < 0 or consumeGuiBusy() then return false, false end
+	if not hotbarSlotReady(slot) then
+		updateConsumeUI("No item in slot " .. tostring(slot))
+		return false, false
+	end
 
 	consumeBusy = true
-	updateConsumeUI(statusName == "Hunger" and "Equipping food (slot 6)" or "Equipping water (slot 7)")
+	updateConsumeUI(statusName == "Hunger" and "Pressing top-row 6" or "Pressing top-row 7")
 	if not pressSlot(slot) or not waitConsume(0.5, id) then
 		consumeBusy = false
 		return false, false
 	end
 
-	virtualConsumeClick(true)
-	local started = waitConsumeStarted(initial, statusName, 2.5, id)
-	if not started and consumeActive(id) then
-		-- VirtualInputManager fallback remains inside Roblox and does not move the
-		-- physical Windows cursor.
-		virtualConsumeClick(false)
-		started = waitConsumeStarted(initial, statusName, 2.5, id)
-	end
+	-- In SOME TOWN, selecting food/water with the top number row starts the
+	-- consume action by itself. Do not send any mouse click.
+	local started = true
 
 	local completed = false
 	if started then
@@ -956,9 +960,6 @@ local function consumeSlot(slot, statusName, id)
 		completed = completed or (final >= 0 and final > initial + 0.1)
 	end
 
-	-- Pressing the same slot again restores the unarmed state after the action.
-	pressSlot(slot)
-	task.wait(0.15)
 	consumeBusy = false
 	Consume.Progress = -1
 	updateConsumeUI(completed and "Cooldown" or (started and "Use unverified" or "No item/action in slot"))
