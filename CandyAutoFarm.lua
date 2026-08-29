@@ -905,7 +905,18 @@ local function lockerPanels()
 	local ui = locker and locker:FindFirstChild("ui")
 	local left = ui and ui:FindFirstChild("Left")
 	local right = ui and (ui:FindFirstChild("Right") or ui:FindFirstChild("Safe"))
-	return ui and left and right and visible(ui) and {ui, left} or nil
+	return ui and left and right and visible(ui) and {ui, left, right} or nil
+end
+
+local function lockerItemTarget(panel, itemName)
+	local item = exact(panel, itemName)
+	if not item then return nil end
+	-- The External clicks the exact item object in the panel, not its outer
+	-- inventory frame. This matters because the outer frame can cover most of
+	-- the locker and its centre is not on the SeedCandy card.
+	if item:IsA("GuiObject") and visible(item) then return item end
+	local button = clickableFrom(item, panel)
+	return button and button:IsA("GuiObject") and visible(button) and button or nil
 end
 
 local function deposit(id)
@@ -918,18 +929,34 @@ local function deposit(id)
 		if panels then break end
 	end
 	if not panels then return false end
-	local ui, inventory = panels[1], panels[2]
-	local seed = exact(inventory, "SeedCandy")
-	if not seed then closeGui(ui); return false end
-	local card = seed
-	while card.Parent and card.Parent ~= inventory and not card:IsA("GuiButton") do card = card.Parent end
-	if not clickAndConfirm(card, function()
-		return exact(inventory, "SeedCandy") == nil
-	end, id, 1.0) then
-		closeGui(ui); return false
+	local ui, inventory, safe = panels[1], panels[2], panels[3]
+	local beforeInventory, inventoryCountKnown = itemCount(inventory, "SeedCandy")
+	local beforeSafe, safeCountKnown = itemCount(safe, "SeedCandy")
+	local function transferred()
+		if exact(inventory, "SeedCandy") == nil then return true end
+		local inventoryNow, inventoryKnownNow = itemCount(inventory, "SeedCandy")
+		if inventoryCountKnown and inventoryKnownNow and inventoryNow < beforeInventory then return true end
+		local safeNow, safeKnownNow = itemCount(safe, "SeedCandy")
+		return safeCountKnown and safeKnownNow and safeNow > beforeSafe
 	end
-	local removed = exact(inventory, "SeedCandy") == nil
-	closeGui(ui); return removed and active(id)
+
+	local moved = false
+	for attempt = 1, 3 do
+		if not active(id) then break end
+		local seed = lockerItemTarget(inventory, "SeedCandy")
+		if not seed then
+			moved = transferred()
+			break
+		end
+		stage(6, nil, "Depositing SeedCandy ("..attempt.."/3)")
+		if clickAndConfirm(seed, transferred, id, 1.15) then
+			moved = true
+			break
+		end
+		task.wait(0.2)
+	end
+	if not moved then moved = transferred() end
+	closeGui(ui); return moved and active(id)
 end
 
 local function cycle(id)
