@@ -40,7 +40,12 @@ local State = {
     Enabled = true,
     ReadyToClick = true,
     Clicking = false,
+    WaitingFeedback = false,
     MinigameVisible = false,
+    MinigameStartedAt = 0,
+    InitialDashRotation = 0,
+    DashStartedMoving = false,
+    LastClickAt = 0,
     Hits = 0,
     Tolerance = 9,
     Connections = {},
@@ -99,6 +104,8 @@ local function clickRing(ring)
     end
     State.Clicking = true
     State.ReadyToClick = false
+    State.WaitingFeedback = true
+    State.LastClickAt = os.clock()
 
     task.spawn(function()
         local position = ring.AbsolutePosition + (ring.AbsoluteSize / 2)
@@ -130,6 +137,8 @@ local renderConnection = RunService.RenderStepped:Connect(function()
             State.MinigameVisible = false
             State.ReadyToClick = true
             State.Clicking = false
+            State.WaitingFeedback = false
+            State.DashStartedMoving = false
             State.Hits = 0
         end
         return
@@ -137,13 +146,39 @@ local renderConnection = RunService.RenderStepped:Connect(function()
 
     if not State.MinigameVisible then
         State.MinigameVisible = true
-        State.ReadyToClick = true
+        State.ReadyToClick = false
         State.Clicking = false
+        State.WaitingFeedback = false
+        State.MinigameStartedAt = os.clock()
+        State.InitialDashRotation = dash.Rotation
+        State.DashStartedMoving = false
         State.Hits = 0
         notify("Minigame detected")
     end
 
-    if State.ReadyToClick and not State.Clicking then
+    -- The UI is inserted before the server round and its rotations are fully
+    -- initialized. Do not accept the initial 0/0 overlap as a real target.
+    if not State.DashStartedMoving then
+        local elapsed = os.clock() - State.MinigameStartedAt
+        local moved = angleDistance(dash.Rotation, State.InitialDashRotation)
+        if elapsed >= 0.05 and moved >= 1.5 then
+            State.DashStartedMoving = true
+            State.ReadyToClick = true
+        else
+            return
+        end
+    end
+
+    -- If a synthetic click was ignored by the client, allow another attempt
+    -- on the next pass instead of waiting forever for feedback.
+    if State.WaitingFeedback and not State.Clicking then
+        if os.clock() - State.LastClickAt >= 0.75 then
+            State.WaitingFeedback = false
+            State.ReadyToClick = true
+        end
+    end
+
+    if State.ReadyToClick and not State.Clicking and not State.WaitingFeedback then
         local difference = angleDistance(dash.Rotation, target.Rotation)
         if difference <= State.Tolerance then
             clickRing(ring)
@@ -158,6 +193,7 @@ local feedbackConnection = Feedback.OnClientEvent:Connect(function(payload)
     end
 
     if payload.hit == true then
+        State.WaitingFeedback = false
         State.Hits = State.Hits + 1
         if payload.final == true then
             State.ReadyToClick = false
@@ -171,6 +207,7 @@ local feedbackConnection = Feedback.OnClientEvent:Connect(function(payload)
             end)
         end
     else
+        State.WaitingFeedback = false
         notify("Miss detected; waiting for the next rotation")
         task.delay(0.15, function()
             if State.Enabled and State.MinigameVisible then
@@ -184,10 +221,12 @@ State.Connections[#State.Connections + 1] = feedbackConnection
 local fishingConnection = FishingEvent.OnClientEvent:Connect(function(action, itemName)
     if action == "FinishFishing" then
         State.ReadyToClick = false
+        State.WaitingFeedback = false
         State.MinigameVisible = false
         notify("Caught " .. tostring(itemName))
     elseif action == "Canceled" then
         State.ReadyToClick = false
+        State.WaitingFeedback = false
         State.MinigameVisible = false
         notify("Fishing canceled")
     end
