@@ -5,6 +5,7 @@ local Players = game:GetService("Players")
 local VIM = game:GetService("VirtualInputManager")
 local VirtualUser = game:GetService("VirtualUser")
 local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
@@ -2025,10 +2026,11 @@ function Spectate:Shutdown()
 end
 
 local GPS = {
-	MapScale = 7.26191,
 	MaxDistance = 25000,
 	YOffset = 0,
 	Target = nil,
+	ConfigIcons = nil,
+	LastMarkerCenter = nil,
 	Status = "Place a marker on the in-game map",
 	Connection = nil,
 	Accumulator = 0,
@@ -2047,6 +2049,41 @@ function GPS:SetStatus(text)
 	end
 end
 
+function GPS:Notify(ok)
+	pcall(function()
+		Library:Notification({
+			Name = ok and "GPS READY" or "GPS",
+			Description = self.Status,
+			Color = ok and Color3.fromRGB(121, 49, 255) or Color3.fromRGB(235, 77, 77),
+		})
+	end)
+end
+
+function GPS:GetConfigIcons()
+	if self.ConfigIcons then return self.ConfigIcons end
+	local modules = ReplicatedStorage:FindFirstChild("Game_Modules")
+	local mapModule = modules and modules:FindFirstChild("MapConfig")
+	if not mapModule or not mapModule:IsA("ModuleScript") then
+		return nil, "MapConfig was not found"
+	end
+
+	local ok, config = pcall(require, mapModule)
+	if not ok or type(config) ~= "table" or type(config.Icons) ~= "table" then
+		return nil, "MapConfig could not be read"
+	end
+
+	local icons = {}
+	for _, entry in pairs(config.Icons) do
+		if type(entry) == "table" and type(entry.Name) == "string"
+			and typeof(entry.Position) == "Vector3" then
+			icons[entry.Name] = entry.Position
+		end
+	end
+	if next(icons) == nil then return nil, "MapConfig has no landmarks" end
+	self.ConfigIcons = icons
+	return icons
+end
+
 function GPS:FindMapObjects()
 	local playerGui = player:FindFirstChildOfClass("PlayerGui")
 	if not playerGui then return nil, "PlayerGui is not ready" end
@@ -2063,87 +2100,127 @@ function GPS:FindMapObjects()
 		return nil, "ViewportFrame was not found"
 	end
 
-	local userMarker = viewport:FindFirstChild("UserMarker", true)
 	local mapMarker = viewport:FindFirstChild("MapMarker", true)
-	local mapCamera = viewport.CurrentCamera or viewport:FindFirstChild("Camera", true)
-	local mapBase = viewport:FindFirstChild("MapBase", true)
-	if not userMarker or not userMarker:IsA("GuiObject") then return nil, "UserMarker was not found" end
+	local iconFolder = viewport:FindFirstChild("IconFolder", true)
 	if not mapMarker or not mapMarker:IsA("GuiObject") then return nil, "Place a GPS marker on the map" end
 	if not mapMarker.Visible then return nil, "Place a GPS marker on the map" end
-	if not mapCamera or not mapCamera:IsA("Camera") then return nil, "Map camera was not found" end
-	if not mapBase or not mapBase:IsA("BasePart") then return nil, "MapBase was not found" end
+	if not iconFolder then return nil, "Map landmarks were not found" end
 
 	return {
 		Viewport = viewport,
-		UserMarker = userMarker,
 		MapMarker = mapMarker,
-		Camera = mapCamera,
-		MapBase = mapBase,
+		IconFolder = iconFolder,
 	}
 end
 
-function GPS:UnprojectMarker(marker, mapObjects)
-	local viewport = mapObjects.Viewport
-	local viewportPosition = viewport.AbsolutePosition
-	local viewportSize = viewport.AbsoluteSize
-	if viewportSize.X <= 1 or viewportSize.Y <= 1 then return nil end
+local function guiCenter(gui)
+	if not gui or not gui:IsA("GuiObject") then return nil end
+	local size = gui.AbsoluteSize
+	if size.X <= 0 or size.Y <= 0 then return nil end
+	local point = gui.AbsolutePosition + size / 2
+	if point.X ~= point.X or point.Y ~= point.Y then return nil end
+	return point
+end
 
-	local markerCenter = marker.AbsolutePosition + marker.AbsoluteSize / 2
-	local ndcX = ((markerCenter.X - viewportPosition.X) / viewportSize.X) * 2 - 1
-	local ndcY = 1 - ((markerCenter.Y - viewportPosition.Y) / viewportSize.Y) * 2
-	local camera = mapObjects.Camera
-	local cameraCFrame = camera.CFrame
-	local fieldOfView = math.rad(camera.FieldOfView)
-	if fieldOfView <= 0.01 or fieldOfView >= math.rad(179) then return nil end
+function GPS:CalibrateMarker(mapObjects)
+	local configIcons, failure = self:GetConfigIcons()
+	if not configIcons then return nil, failure end
 
-	local tanHalfFov = math.tan(fieldOfView * 0.5)
-	local aspect = viewportSize.X / viewportSize.Y
-	-- ViewportFrame cameras store the back/Z vector in CFrame.LookVector for
-	-- this map.  The world ray therefore starts in the inverse direction.
-	local rayDirection = -cameraCFrame.LookVector
-		+ cameraCFrame.RightVector * (ndcX * aspect * tanHalfFov)
-		+ cameraCFrame.UpVector * (ndcY * tanHalfFov)
-	if math.abs(rayDirection.Y) < 0.0001 then return nil end
+	local samples = {}
+	for name, worldPosition in pairs(configIcons) do
+		local icon = mapObjects.IconFolder:FindFirstChild(name)
+		local screenPoint = guiCenter(icon)
+		if screenPoint then
+			samples[#samples + 1] = {
+				Screen = screenPoint,
+				World = Vector2.new(worldPosition.X, worldPosition.Z),
+			}
+		end
+	end
+	if #samples < 3 then return nil, "Open the map and wait a moment" end
 
-	local distance = (mapObjects.MapBase.Position.Y - cameraCFrame.Position.Y) / rayDirection.Y
-	if distance <= 0 or distance ~= distance or distance == math.huge then return nil end
-	local point = cameraCFrame.Position + rayDirection * distance
-	return Vector2.new(point.X, point.Z)
+	-- Fit a 2D rotation/scale/translation from the dumped MapConfig landmarks
+	-- to their live GUI icons.  This keeps working after the player pans or
+	-- zooms the map and does not depend on the ViewportFrame camera internals.
+	local meanScreen, meanWorld = Vector2.zero, Vector2.zero
+	for _, sample in ipairs(samples) do
+		meanScreen += sample.Screen
+		meanWorld += sample.World
+	end
+	meanScreen /= #samples
+	meanWorld /= #samples
+
+	local denominator, realPart, imaginaryPart = 0, 0, 0
+	for _, sample in ipairs(samples) do
+		local screenDelta = sample.Screen - meanScreen
+		local worldDelta = sample.World - meanWorld
+		denominator += screenDelta.X * screenDelta.X + screenDelta.Y * screenDelta.Y
+		realPart += worldDelta.X * screenDelta.X + worldDelta.Y * screenDelta.Y
+		imaginaryPart += worldDelta.Y * screenDelta.X - worldDelta.X * screenDelta.Y
+	end
+	if denominator < 25 then return nil, "Open the full map and wait a moment" end
+
+	local scaleReal = realPart / denominator
+	local scaleImaginary = imaginaryPart / denominator
+	local scale = math.sqrt(scaleReal * scaleReal + scaleImaginary * scaleImaginary)
+	if scale < 0.05 or scale > 100 then return nil, "Map calibration is not ready" end
+
+	local averageError = 0
+	for _, sample in ipairs(samples) do
+		local delta = sample.Screen - meanScreen
+		local predicted = meanWorld + Vector2.new(
+			scaleReal * delta.X - scaleImaginary * delta.Y,
+			scaleImaginary * delta.X + scaleReal * delta.Y
+		)
+		averageError += (predicted - sample.World).Magnitude
+	end
+	averageError /= #samples
+	if averageError > 150 then return nil, "Map landmarks are still updating" end
+
+	local markerCenter = guiCenter(mapObjects.MapMarker)
+	if not markerCenter then return nil, "GPS marker is not ready" end
+	local markerDelta = markerCenter - meanScreen
+	local target = meanWorld + Vector2.new(
+		scaleReal * markerDelta.X - scaleImaginary * markerDelta.Y,
+		scaleImaginary * markerDelta.X + scaleReal * markerDelta.Y
+	)
+	self.LastMarkerCenter = markerCenter
+	return target
+end
+
+function GPS:FindLandingY(x, z, character, fallbackY)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = character and { character } or {}
+	params.IgnoreWater = false
+	local result = Workspace:Raycast(Vector3.new(x, 3000, z), Vector3.new(0, -6000, 0), params)
+	if result then return result.Position.Y + 4 + self.YOffset end
+	return fallbackY + self.YOffset
 end
 
 function GPS:ResolveTarget(updateUI)
 	local character, root = characterRoot()
 	if not character or not root then
-		self.Target = nil
 		if updateUI ~= false then self:SetStatus("Character is not ready") end
 		return nil
 	end
 
 	local mapObjects, failure = self:FindMapObjects()
 	if not mapObjects then
-		self.Target = nil
 		if updateUI ~= false then self:SetStatus(failure) end
 		return nil
 	end
 
-	local playerMapPoint = self:UnprojectMarker(mapObjects.UserMarker, mapObjects)
-	local targetMapPoint = self:UnprojectMarker(mapObjects.MapMarker, mapObjects)
-	if not playerMapPoint or not targetMapPoint then
-		self.Target = nil
-		if updateUI ~= false then self:SetStatus("Map marker conversion failed") end
+	local targetXZ, conversionFailure = self:CalibrateMarker(mapObjects)
+	if not targetXZ then
+		if updateUI ~= false then self:SetStatus(conversionFailure or "Map marker conversion failed") end
 		return nil
 	end
 
-	-- Same Never Town conversion used by the External: the viewport map is
-	-- rotated 90 degrees and calibrated to 7.26191 world studs per map unit.
-	local target = Vector3.new(
-		root.Position.X - (targetMapPoint.Y - playerMapPoint.Y) * self.MapScale,
-		root.Position.Y + self.YOffset,
-		root.Position.Z + (targetMapPoint.X - playerMapPoint.X) * self.MapScale
-	)
+	local targetY = self:FindLandingY(targetXZ.X, targetXZ.Y, character, root.Position.Y)
+	local target = Vector3.new(targetXZ.X, targetY, targetXZ.Y)
 	local distance = (Vector3.new(target.X, root.Position.Y, target.Z) - root.Position).Magnitude
 	if distance > self.MaxDistance or distance ~= distance then
-		self.Target = nil
 		if updateUI ~= false then self:SetStatus("Marker is outside the safe range") end
 		return nil
 	end
@@ -2155,7 +2232,7 @@ end
 
 function GPS:Teleport()
 	if Farm.Enabled then self:SetStatus("Disable Auto Farm Candy first"); return false end
-	local target = self:ResolveTarget(true)
+	local target = self:ResolveTarget(true) or self.Target
 	if not target then return false end
 	local character, root = characterRoot()
 	if not character or not root then self:SetStatus("Character is not ready"); return false end
@@ -2163,10 +2240,21 @@ function GPS:Teleport()
 	Spectate:Stop(true)
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
-	local offset = target - root.Position
-	local ok = pcall(function() character:PivotTo(character:GetPivot() + offset) end)
+	local rotation = character:GetPivot().Rotation
+	local ok = pcall(function() character:PivotTo(CFrame.new(target) * rotation) end)
 	if not ok then self:SetStatus("Teleport failed"); return false end
-	task.wait(0.2)
+	task.wait(0.25)
+	if root.Parent and (root.Position - target).Magnitude > 35 then
+		ok = pcall(function()
+			root.CFrame = CFrame.new(target) * root.CFrame.Rotation
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end)
+	end
+	if not ok or not root.Parent or (root.Position - target).Magnitude > 80 then
+		self:SetStatus("Teleport was rejected")
+		return false
+	end
 	self:SetStatus("Teleport complete")
 	return true
 end
@@ -2176,9 +2264,11 @@ function GPS:Start()
 	self.Accumulator = 0
 	self.Connection = RunService.Heartbeat:Connect(function(delta)
 		self.Accumulator += delta
-		if self.Accumulator < 0.75 then return end
+		if self.Accumulator < 1 then return end
 		self.Accumulator = 0
-		if self.Page and self.Page.Active then self:ResolveTarget(true) end
+		-- Cache the last valid marker while the full map is visible.  Closing the
+		-- map must not erase it before the user presses TELEPORT TO GPS.
+		self:ResolveTarget(false)
 	end)
 end
 
@@ -2460,10 +2550,25 @@ spectateButtons:Add("SPECTATE PLAYER", function() Spectate:Watch() end)
 spectateButtons:Add("STOP SPECTATE", function() Spectate:Stop() end)
 SpectateControls:CreateButton({ Name="REFRESH PLAYERS", Callback=function() Spectate:RefreshPlayers() end })
 
-GPSControls:CreateButton({ Name="READ GPS MARKER", Callback=function() GPS:ResolveTarget(true) end })
+GPSControls:CreateButton({ Name="READ GPS MARKER", Callback=function()
+	local target = GPS:ResolveTarget(true)
+	if not target and GPS.Target then
+		target = GPS.Target
+		GPS:SetStatus("Using the last saved marker")
+	end
+	GPS:Notify(target ~= nil)
+end })
 GPSControls:Slider({ Name="Landing Y Offset", Flag="AraiGPSYOffset", Min=-5, Max=15, Default=0, Suffix=" studs", Compact=true,
-	Callback=function(value) GPS.YOffset=value; GPS:ResolveTarget(true) end })
-GPSControls:CreateButton({ Name="TELEPORT TO GPS", Callback=function() GPS:Teleport() end })
+	Callback=function(value)
+		local previous = GPS.YOffset
+		GPS.YOffset = value
+		if GPS.Target then GPS.Target += Vector3.new(0, value - previous, 0) end
+		GPS:ResolveTarget(false)
+	end })
+GPSControls:CreateButton({ Name="TELEPORT TO GPS", Callback=function()
+	local ok = GPS:Teleport()
+	GPS:Notify(ok)
+end })
 
 invisibleToggle = InvisibleControls:Toggle({ Name="Underground Invisible", Flag="AraiUndergroundInvisible", Default=false,
 	Callback=function(value)
