@@ -1941,7 +1941,7 @@ local function make_resizeable(frame, min_size)
 		Size = UDim2New(0, 12, 0, 12),
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
-		Text = "◢",
+		Text = "/",
 		TextColor3 = Menu.Theme.Text,
 		TextTransparency = 0.45,
 		TextSize = 11,
@@ -7718,7 +7718,7 @@ Library.Watermark = function(self, NameOrOptions)
 			if Render then TableInsert(Parts, Render()) end
 		end
 		if #Parts == 0 then return "" end
-		return TableConcat(Parts, "  ·  ")
+		return TableConcat(Parts, "  |  ")
 	end
 
 	local function SyncCenteredWidths()
@@ -7896,7 +7896,7 @@ function Library:KeybindList(name)
 				local k = tostring(key or "")
 				local n = tostring(bind_name or "")
 				local m = tostring(mode or "")
-				row.Instance.Text = k .. "  ·  " .. n .. "  ·  " .. m
+				row.Instance.Text = k .. "  |  " .. n .. "  |  " .. m
 				row.Instance.TextTransparency = active and 0 or 0.35
 			end)
 		end
@@ -8033,7 +8033,7 @@ function Library:CreateQuickConfigs()
 					Size = UDim2New(0, 0, 0, 14),
 					AutomaticSize = Enum.AutomaticSize.X,
 					BackgroundTransparency = 1,
-					Text = "  ·  ",
+					Text = "  |  ",
 					TextColor3 = Library.Theme["Text"],
 					TextTransparency = 0.35,
 					TextSize = Menu.FontSettings.SmallTextSize or 12,
@@ -8140,7 +8140,7 @@ function Library:SpectatorList(name)
 			end
 		end
 		table.sort(parts)
-		return TableConcat(parts, "  ·  ")
+		return TableConcat(parts, "  |  ")
 	end
 
 	local function avatar_url(user_id)
@@ -13425,7 +13425,7 @@ end
 				Size = UDim2FromOffset(24, 24),
 				BackgroundColor3 = Library.Theme["Element"],
 				BorderSizePixel = 0,
-				Text = "×",
+				Text = "X",
 				TextColor3 = Library.Theme["Text"],
 				TextSize = 16,
 				FontFace = Library.Font,
@@ -13805,7 +13805,7 @@ end
 			if not Items["Status"] or not Items["Status"].Instance then return end
 			local weapon_name = Window._active_weapon or "None"
 			local category = Window._active_category or "Skin"
-			Items["Status"].Instance.Text = tostring(weapon_count) .. " weapons • " .. tostring(cosmetic_count) .. " " .. string.lower(category) .. "s • " .. weapon_name
+				Items["Status"].Instance.Text = tostring(weapon_count) .. " weapons | " .. tostring(cosmetic_count) .. " " .. string.lower(category) .. "s | " .. weapon_name
 		end
 
 		local function RefreshWeaponSlots()

@@ -2080,32 +2080,30 @@ Farm.GPS = GPS
 getgenv().AraiESP = ESP
 
 local Window = Library:Window({ Name="A-RAI HUB | Never Town", Game="Never Town" })
-local FarmPage = Window:CreatePage({ Name="◆ FARM" })
-local Controls = FarmPage:CreateSection({ Name="⚡ AUTOMATION", Side=1, Collapsed=false })
-local Monitor = FarmPage:CreateSection({ Name="◈ FARM MONITOR", Side=2, Collapsed=false })
+local FarmPage = Window:CreatePage({ Name="FARM" })
+local Controls = FarmPage:CreateSection({ Name="AUTOMATION", Side=1, Collapsed=false })
+local Monitor = FarmPage:CreateSection({ Name="FARM STATUS", Side=2, Collapsed=false })
 
-local PlayerPage = Window:CreatePage({ Name="◉ PLAYER" })
-local SpectateControls = PlayerPage:CreateSection({ Name="◉ SPECTATE", Side=1, Collapsed=false })
-local GPSControls = PlayerPage:CreateSection({ Name="⌖ GPS TELEPORT", Side=1, Collapsed=false })
-local Survival = PlayerPage:CreateSection({ Name="♥ AUTO EAT / DRINK", Side=1, Collapsed=false })
-local SpectateInfo = PlayerPage:CreateSection({ Name="◎ WATCH STATUS", Side=2, Collapsed=false })
-local GPSInfo = PlayerPage:CreateSection({ Name="⌖ GPS STATUS", Side=2, Collapsed=false })
-local SurvivalMonitor = PlayerPage:CreateSection({ Name="＋ SURVIVAL STATUS", Side=2, Collapsed=false })
+local PlayerPage = Window:CreatePage({ Name="PLAYER" })
+local SpectateControls = PlayerPage:CreateSection({ Name="SPECTATE", Side=1, Collapsed=false })
+local GPSControls = PlayerPage:CreateSection({ Name="GPS TELEPORT", Side=1, Collapsed=false })
+local Survival = PlayerPage:CreateSection({ Name="AUTO EAT / DRINK", Side=1, Collapsed=false })
+local SpectateInfo = PlayerPage:CreateSection({ Name="SPECTATE STATUS", Side=2, Collapsed=false })
+local GPSInfo = PlayerPage:CreateSection({ Name="GPS STATUS", Side=2, Collapsed=false })
+local SurvivalMonitor = PlayerPage:CreateSection({ Name="SURVIVAL STATUS", Side=2, Collapsed=false })
 
-local ESPPage = Window:CreatePage({ Name="◇ ESP" })
-local ESPControls = ESPPage:CreateSection({ Name="◇ ESP CONTROLS", Side=1, Collapsed=false })
+local ESPPage = Window:CreatePage({ Name="ESP" })
+local ESPControls = ESPPage:CreateSection({ Name="ESP CONTROLS", Side=1, Collapsed=false })
 
 local SettingsPage = Library:CreateSettingsPage(Window)
-SettingsPage.Name = "⚙ SETTINGS"
+SettingsPage.Name = "SETTINGS"
 if SettingsPage.UI and SettingsPage.UI.Label then SettingsPage.UI.Label.Text = SettingsPage.Name end
 local HubSettings = SettingsPage:CreateSubPage({ Name="A-RAI" })
-local DeviceSettings = HubSettings:CreateSection({ Name="⚙ DEVICE & PERFORMANCE", Side=1, Collapsed=false })
-local AboutSettings = HubSettings:CreateSection({ Name="◆ A-RAI HUB", Side=2, Collapsed=false })
+local DeviceSettings = HubSettings:CreateSection({ Name="DEVICE & PERFORMANCE", Side=1, Collapsed=false })
 Spectate.Page = PlayerPage
 GPS.Page = PlayerPage
 
 Controls:Toggle({ Name="Auto Farm Candy", Flag="AraiAutoCandy", Default=false,
-	Tooltip="Farm 5 ingredients, craft SeedCandy x5 and deposit it at REBEL.",
 	Callback=function(value) if value then Farm:Start() else Farm:Stop() end end })
 Controls:Toggle({ Name="Move Camera To Prompt", Flag="AraiCandyCamera", Default=true,
 	Callback=function(value) Farm.Settings.MoveCamera=value end })
@@ -2122,7 +2120,6 @@ SpectateControls:Slider({ Name="Spectate Range", Flag="AraiSpectateRange", Min=5
 	end })
 spectateDropdown = SpectateControls:CreateDropdown({
 	Name="Select Player", Items={"No nearby players in range"},
-	Description="Ready players sorted from nearest to farthest.",
 	Callback=function(value)
 		if Spectate.OptionMap[value] then
 			Spectate.SelectedLabel = value
@@ -2135,26 +2132,23 @@ spectateDropdown = SpectateControls:CreateDropdown({
 	end,
 })
 local spectateButtons = SpectateControls:CreateButton({})
-spectateButtons:Add("▶ SPECTATE PLAYER", function() Spectate:Watch() end)
-spectateButtons:Add("■ STOP SPECTATE", function() Spectate:Stop() end)
-SpectateControls:CreateButton({ Name="↻ REFRESH PLAYERS", Callback=function() Spectate:RefreshPlayers() end })
+spectateButtons:Add("SPECTATE PLAYER", function() Spectate:Watch() end)
+spectateButtons:Add("STOP SPECTATE", function() Spectate:Stop() end)
+SpectateControls:CreateButton({ Name="REFRESH PLAYERS", Callback=function() Spectate:RefreshPlayers() end })
 
-GPSControls:Label({ Name="Never Town map marker", Description="Open the in-game map and place its GPS marker first." })
+GPSControls:CreateButton({ Name="READ GPS MARKER", Callback=function() GPS:ResolveTarget(true) end })
 GPSControls:Slider({ Name="Landing Y Offset", Flag="AraiGPSYOffset", Min=-5, Max=15, Default=0, Suffix=" studs", Compact=true,
 	Callback=function(value) GPS.YOffset=value; GPS:ResolveTarget(true) end })
-local gpsButtons = GPSControls:CreateButton({})
-gpsButtons:Add("⌖ TELEPORT TO GPS", function() GPS:Teleport() end)
-gpsButtons:Add("↻ READ MARKER", function() GPS:ResolveTarget(true) end)
+GPSControls:CreateButton({ Name="TELEPORT TO GPS", Callback=function() GPS:Teleport() end })
 
 Survival:Toggle({ Name="Auto Eat / Drink", Flag="AraiAutoConsume", Default=false,
-	Tooltip="Read the dumped Hunger/Thirsty bars. Food must be in slot 6 and water in slot 7.",
 	Callback=function(value) if value then Consume:Start() else Consume:Stop() end end })
 Survival:Slider({ Name="Eat Below", Flag="AraiHungerThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
 	Callback=function(value) Consume.HungerThreshold=math.floor(value); updateConsumeUI() end })
 Survival:Slider({ Name="Drink Below", Flag="AraiThirstThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
 	Callback=function(value) Consume.ThirstThreshold=math.floor(value); updateConsumeUI() end })
-Survival:Label({ Name="Food: slot 6", Description=IS_MOBILE and "Mobile: taps hotbar slot 6" or "PC: presses top-row 6" })
-Survival:Label({ Name="Water: slot 7", Description=IS_MOBILE and "Mobile: taps hotbar slot 7" or "PC: presses top-row 7" })
+Survival:Label({ Name="Food Slot: 6" })
+Survival:Label({ Name="Water Slot: 7" })
 
 ESPControls:Toggle({ Name="Enable ESP", Flag="AraiESPEnabled", Default=false,
 	Callback=function(value) if value then ESP:Start() else ESP:Stop() end end })
@@ -2175,31 +2169,26 @@ ESPControls:Slider({ Name="Max Players", Flag="AraiESPMaxPlayers", Min=5, Max=30
 espStatusLabel = ESPControls:Label({ Name="ESP: OFF" })
 
 statusLabel = Monitor:Label("Status: Idle")
-spectateReadyLabel = SpectateInfo:Label({ Name="Players ready: 0 / 0", Description="Detected targets inside Spectate Range" })
+spectateReadyLabel = SpectateInfo:Label({ Name="Players ready: 0 / 0" })
 spectateStatusLabel = SpectateInfo:Label({ Name="Status: Idle" })
 
-gpsStatusLabel = GPSInfo:Label({ Name="GPS: Place a marker on the in-game map", Description="Reads PlayerGui/MapFrame/ViewportFrame" })
-gpsCoordinateLabel = GPSInfo:Label({ Name="Target: Not detected", Description="Converted Never Town world coordinates" })
-GPSInfo:Label({ Name="External calibration: 7.26191", Description="Uses UserMarker and MapMarker with the original 90-degree map conversion." })
-GPSInfo:Label({ Name="Mobile supported", Description="Open the game map, tap a marker, then use the GPS button." })
+gpsStatusLabel = GPSInfo:Label({ Name="GPS: Place a marker on the map" })
+gpsCoordinateLabel = GPSInfo:Label({ Name="Target: Not detected" })
 
 consumeStatusLabel = SurvivalMonitor:Label({ Name="Consume: Disabled" })
 hungerLabel = SurvivalMonitor:Label({ Name="Hunger: Unknown | eat below 30%" })
 thirstLabel = SurvivalMonitor:Label({ Name="Thirst: Unknown | drink below 30%" })
 consumeProgressLabel = SurvivalMonitor:Label({ Name="Consume progress: Idle" })
 for _, crop in ipairs(CROPS) do
-	local label = Monitor:Label({ Name=crop[1]..": 0 / 100", Description="Candy ingredient" })
+	local label = Monitor:Label({ Name=crop[1]..": 0 / 100" })
 	countLabels[crop[1]] = label
 	attachIcon(label, CANDY_ICONS[crop[1]])
 end
-craftedLabel = Monitor:Label({ Name="SeedCandy crafted: 0", Description="Output produced this run" })
+craftedLabel = Monitor:Label({ Name="SeedCandy crafted: 0" })
 attachIcon(craftedLabel, CANDY_ICONS.SeedCandy)
 
-DeviceSettings:Label({ Name=IS_MOBILE and "◉ Device: Mobile Touch" or "⌨ Device: PC Keyboard", Description="Input mode detected automatically" })
-DeviceSettings:Label({ Name=IS_MOBILE and "ESP motion: 30 FPS" or "ESP motion: 60 FPS", Description="Heavy player/cache reads run in a separate slow loop" })
-DeviceSettings:Label({ Name="Performance tip", Description="Lower ESP Max Players when the server has many players." })
-AboutSettings:Label({ Name="A-RAI HUB", Description="Never Town candy automation, survival, spectate and ESP tools." })
-AboutSettings:Label({ Name="Mobile supported", Description="Touch-ready pages, dropdowns, buttons, toggles and sliders." })
+DeviceSettings:Label({ Name=IS_MOBILE and "Device: Mobile Touch" or "Device: PC Keyboard" })
+DeviceSettings:Label({ Name=IS_MOBILE and "ESP Update Rate: 30 FPS" or "ESP Update Rate: 60 FPS" })
 
 local baseLibraryUnload = Library.Unload
 function Library:Unload(...)
