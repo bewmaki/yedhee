@@ -679,9 +679,8 @@ local function closeGui(bg)
 		if clickAndConfirm(button, closed, nil, 0.45) then return true end
 	end
 
-	-- Escape is a final fallback for layouts whose close icon is not named.
-	pcall(function() key(Enum.KeyCode.Escape, 0.08) end)
-	if waitFor(closed, 0.8) then return true end
+	-- Never use Escape as a close fallback: it opens Roblox's system menu when
+	-- the game-owned X button has not closed the current panel.
 	return closed()
 end
 
@@ -775,6 +774,14 @@ local function seedCandyCard(listFrame)
 	end
 end
 
+local function craftCardSelected(card)
+	local frame1 = card and card:FindFirstChild("Frame1")
+	local frame2 = card and card:FindFirstChild("Frame2")
+	-- Confirmed by snapshot #002: both side frames are visible only on the
+	-- selected SeedCandy recipe card.
+	return frame1 and frame2 and frame1.Visible and frame2.Visible
+end
+
 local function findQuantityButton(bg, amount, container, increase)
 	for _, name in ipairs(increase and {"U", "Up", "Increase", "Plus", "+"} or {"D", "Down", "Decrease", "Minus", "-"}) do
 		local button = container and container:FindFirstChild(name, true)
@@ -852,9 +859,11 @@ local function craftSeedCandy(id)
 	local card = seedCandyCard(listFrame)
 	if not card then closeGui(bg); return false end
 	stage(5, nil, "Selecting SeedCandy")
-	-- Always send one real pointer/touch click to the exact card. CraftText can
-	-- already say SeedCandy before the card has received its selection event.
-	if not click(card) or not waitActive(0.6, id) then
+	-- Always send a pointer/touch click to the exact card. CraftText can already
+	-- say SeedCandy, so verify the two selection frames instead of that text.
+	if not clickAndConfirm(card, function()
+		return craftCardSelected(card)
+	end, id, 0.65) then
 		closeGui(bg); return false
 	end
 	if selectedCraftName(bg) ~= "SeedCandy" then closeGui(bg); return false end
