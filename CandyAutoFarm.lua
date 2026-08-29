@@ -23,7 +23,12 @@ if not Library then
 end
 
 local old = getgenv().SolixCandyFarm
-if type(old) == "table" and type(old.Stop) == "function" then pcall(old.Stop, old) end
+if type(old) == "table" then
+	if type(old.Stop) == "function" then pcall(old.Stop, old) end
+	if type(old.Consume) == "table" and type(old.Consume.Stop) == "function" then
+		pcall(old.Consume.Stop, old.Consume)
+	end
+end
 
 local CROPS = {
 	{ "Cauliflower", Vector3.new(-4167.1, 74.5, 1250.2), Vector3.new(-4145.3, 84.5, 1253.4), Vector3.new(-0.922, -0.363, -0.136) },
@@ -55,6 +60,7 @@ for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = 0 end
 
 local statusLabel, craftedLabel
 local countLabels = {}
+local consumeBusy = false
 
 local function attachIcon(label, url)
 	if not label or not label.UI or not label.UI.Framework then return end
@@ -170,7 +176,6 @@ local function clickAndConfirm(gui, confirm, id, confirmWait)
 	confirmWait = confirmWait or 0.85
 	local point = gui.AbsolutePosition + gui.AbsoluteSize / 2
 	local camera = Workspace.CurrentCamera
-	local environment = type(getgenv) == "function" and getgenv() or _G
 
 	local methods = {
 		function() click(gui) end,
@@ -182,15 +187,6 @@ local function clickAndConfirm(gui, confirm, id, confirmWait)
 		end,
 		function()
 			VirtualUser:ClickButton1(point, camera and camera.CFrame or CFrame.new())
-		end,
-		function()
-			local move = environment.mousemoveabs or environment.mousemoveabsolute
-			local press = environment.mouse1click
-			if type(move) == "function" and type(press) == "function" then
-				move(point.X, point.Y)
-				task.wait(0.05)
-				press()
-			end
 		end,
 	}
 
@@ -264,6 +260,8 @@ local function findPrompt(point)
 end
 
 local function interact(point, id)
+	while consumeBusy and active(id) do task.wait(0.1) end
+	if not active(id) then return false end
 	if Farm.Settings.MoveCamera and Workspace.CurrentCamera then
 		Workspace.CurrentCamera.CFrame = CFrame.lookAt(point[3], point[3] + point[4])
 	end
@@ -774,9 +772,255 @@ function Farm:Stop()
 	updateStatus("Stopped")
 end
 
+-- Auto Eat / Drink ---------------------------------------------------------
+-- Dump paths:
+--   PlayerGui/Status/Main/Status/Hunger/Bar
+--   PlayerGui/Status/Main/Status/Thirsty/Bar
+--   PlayerGui/UIList/Main/Progress/In/InOn/Bar
+local Consume = {
+	Enabled = false,
+	RunId = 0,
+	Hunger = -1,
+	Thirst = -1,
+	HungerThreshold = 30,
+	ThirstThreshold = 30,
+	FoodSlot = 6,
+	WaterSlot = 7,
+	Status = "Disabled",
+	Progress = -1,
+}
+Farm.Consume = Consume
+
+local consumeStatusLabel, hungerLabel, thirstLabel, consumeProgressLabel
+
+local function updateConsumeUI(status)
+	if status then Consume.Status = status end
+	local function valueText(value)
+		return value >= 0 and string.format("%d%%", math.floor(value + 0.5)) or "Unknown"
+	end
+	if consumeStatusLabel then consumeStatusLabel:SetText("Consume: " .. Consume.Status) end
+	if hungerLabel then
+		hungerLabel:SetText(string.format("Hunger: %s | eat below %d%%", valueText(Consume.Hunger), Consume.HungerThreshold))
+	end
+	if thirstLabel then
+		thirstLabel:SetText(string.format("Thirst: %s | drink below %d%%", valueText(Consume.Thirst), Consume.ThirstThreshold))
+	end
+	if consumeProgressLabel then
+		consumeProgressLabel:SetText(Consume.Progress >= 0
+			and string.format("Consume progress: %d%%", math.floor(Consume.Progress + 0.5))
+			or "Consume progress: Idle")
+	end
+end
+
+local function consumeActive(id)
+	return Consume.Enabled and Consume.RunId == id
+end
+
+local function waitConsume(seconds, id)
+	local finish = os.clock() + seconds
+	repeat
+		if not consumeActive(id) then return false end
+		task.wait(math.min(0.1, math.max(0, finish - os.clock())))
+	until os.clock() >= finish
+	return consumeActive(id)
+end
+
+local function statusBarValue(name)
+	local gui = player:FindFirstChildOfClass("PlayerGui")
+	local statusGui = gui and gui:FindFirstChild("Status")
+	local main = statusGui and statusGui:FindFirstChild("Main")
+	local statuses = main and main:FindFirstChild("Status")
+	local group = statuses and statuses:FindFirstChild(name)
+	local bar = group and group:FindFirstChild("Bar")
+	if not bar or not bar:IsA("GuiObject") or not visible(bar) then return -1 end
+	local ratio = bar.Size.Y.Scale
+	if ratio < -0.01 or ratio > 1.01 then
+		local parentHeight = group.AbsoluteSize.Y
+		ratio = parentHeight > 0 and bar.AbsoluteSize.Y / parentHeight or -1
+	end
+	return ratio >= 0 and math.clamp(ratio * 100, 0, 100) or -1
+end
+
+local function consumeProgress()
+	local gui = player:FindFirstChildOfClass("PlayerGui")
+	local uiList = gui and gui:FindFirstChild("UIList")
+	local main = uiList and uiList:FindFirstChild("Main")
+	local progress = main and main:FindFirstChild("Progress")
+	if not progress or not visible(progress) then return false, -1 end
+	local inside = progress:FindFirstChild("In")
+	local insideOn = inside and inside:FindFirstChild("InOn")
+	local bar = insideOn and insideOn:FindFirstChild("Bar")
+	local ratio = bar and bar.Size.X.Scale or -1
+	if bar and (ratio < -0.01 or ratio > 1.01) and insideOn.AbsoluteSize.X > 0 then
+		ratio = bar.AbsoluteSize.X / insideOn.AbsoluteSize.X
+	end
+	return true, ratio >= 0 and math.clamp(ratio * 100, 0, 100) or -1
+end
+
+local SLOT_KEYS = {
+	[1]=Enum.KeyCode.One, [2]=Enum.KeyCode.Two, [3]=Enum.KeyCode.Three,
+	[4]=Enum.KeyCode.Four, [5]=Enum.KeyCode.Five, [6]=Enum.KeyCode.Six,
+	[7]=Enum.KeyCode.Seven, [8]=Enum.KeyCode.Eight, [9]=Enum.KeyCode.Nine,
+}
+
+local function pressSlot(slot)
+	local code = SLOT_KEYS[slot]
+	if not code then return false end
+	key(code, 0.08)
+	return true
+end
+
+local function virtualConsumeClick(useVirtualUser)
+	local camera = Workspace.CurrentCamera
+	local viewport = camera and camera.ViewportSize or Vector2.new(1920, 1080)
+	local point = viewport / 2
+	if useVirtualUser then
+		return pcall(function()
+			VirtualUser:CaptureController()
+			VirtualUser:ClickButton1(point, camera and camera.CFrame or CFrame.new())
+		end)
+	end
+	return pcall(function()
+		VIM:SendMouseButtonEvent(point.X, point.Y, 0, true, game, 0)
+		task.wait(0.08)
+		VIM:SendMouseButtonEvent(point.X, point.Y, 0, false, game, 0)
+	end)
+end
+
+local function refreshConsumeValues()
+	Consume.Hunger = statusBarValue("Hunger")
+	Consume.Thirst = statusBarValue("Thirsty")
+	local progressing, progress = consumeProgress()
+	Consume.Progress = progressing and progress or -1
+	updateConsumeUI()
+	return progressing
+end
+
+local function waitConsumeStarted(initial, statusName, seconds, id)
+	local finish = os.clock() + seconds
+	repeat
+		if not consumeActive(id) then return false end
+		local progressing = refreshConsumeValues()
+		local current = statusName == "Hunger" and Consume.Hunger or Consume.Thirst
+		if progressing or (current >= 0 and current > initial + 0.1) then return true end
+		task.wait(0.1)
+	until os.clock() >= finish
+	return false
+end
+
+local function consumeGuiBusy()
+	if Farm.Stage == 1 or Farm.Stage == 2 or Farm.Stage == 5 or Farm.Stage == 6 then return true end
+	return craftUI() ~= nil or inventoryPanel() ~= nil or lockerPanels() ~= nil
+end
+
+local function consumeSlot(slot, statusName, id)
+	local initial = statusName == "Hunger" and Consume.Hunger or Consume.Thirst
+	if initial < 0 or consumeGuiBusy() then return false, false end
+
+	consumeBusy = true
+	updateConsumeUI(statusName == "Hunger" and "Equipping food (slot 6)" or "Equipping water (slot 7)")
+	if not pressSlot(slot) or not waitConsume(0.5, id) then
+		consumeBusy = false
+		return false, false
+	end
+
+	virtualConsumeClick(true)
+	local started = waitConsumeStarted(initial, statusName, 2.5, id)
+	if not started and consumeActive(id) then
+		-- VirtualInputManager fallback remains inside Roblox and does not move the
+		-- physical Windows cursor.
+		virtualConsumeClick(false)
+		started = waitConsumeStarted(initial, statusName, 2.5, id)
+	end
+
+	local completed = false
+	if started then
+		updateConsumeUI(statusName == "Hunger" and "Eating" or "Drinking")
+		local finish = os.clock() + 35
+		local sawProgress, missingSamples = false, 0
+		repeat
+			if not consumeActive(id) then break end
+			local progressing = refreshConsumeValues()
+			local current = statusName == "Hunger" and Consume.Hunger or Consume.Thirst
+			if progressing then
+				sawProgress, missingSamples = true, 0
+			elseif sawProgress then
+				missingSamples += 1
+			end
+			if current >= 0 and current > initial + 0.1 and (not sawProgress or missingSamples >= 3) then
+				completed = true; break
+			end
+			task.wait(0.1)
+		until os.clock() >= finish or (sawProgress and missingSamples >= 3)
+		local final = statusName == "Hunger" and Consume.Hunger or Consume.Thirst
+		completed = completed or (final >= 0 and final > initial + 0.1)
+	end
+
+	-- Pressing the same slot again restores the unarmed state after the action.
+	pressSlot(slot)
+	task.wait(0.15)
+	consumeBusy = false
+	Consume.Progress = -1
+	updateConsumeUI(completed and "Cooldown" or (started and "Use unverified" or "No item/action in slot"))
+	return started, completed
+end
+
+function Consume:Start()
+	if self.Enabled then return end
+	self.Enabled = true
+	self.RunId += 1
+	local id = self.RunId
+	task.spawn(function()
+		local foodSamples, waterSamples = 0, 0
+		local nextFood, nextWater = 0, 0
+		local preferFood = true
+		while consumeActive(id) do
+			local progressing = refreshConsumeValues()
+			if not consumeBusy and not progressing and not consumeGuiBusy() then
+				foodSamples = self.Hunger >= 0 and self.Hunger < self.HungerThreshold - 1 and foodSamples + 1 or 0
+				waterSamples = self.Thirst >= 0 and self.Thirst < self.ThirstThreshold - 1 and waterSamples + 1 or 0
+				local now = os.clock()
+				local needFood = foodSamples >= 4 and now >= nextFood
+				local needWater = waterSamples >= 4 and now >= nextWater
+				local useFood = needFood and (not needWater or preferFood)
+				local useWater = needWater and not useFood
+				if useFood then
+					foodSamples = 0
+					local started, completed = consumeSlot(self.FoodSlot, "Hunger", id)
+					nextFood = os.clock() + (completed and 60 or (started and 45 or 15))
+					preferFood = false
+				elseif useWater then
+					waterSamples = 0
+					local started, completed = consumeSlot(self.WaterSlot, "Thirsty", id)
+					nextWater = os.clock() + (completed and 60 or (started and 45 or 15))
+					preferFood = true
+				else
+					updateConsumeUI("Monitoring slots 6/7")
+				end
+			elseif progressing then
+				updateConsumeUI("Waiting for active progress")
+			end
+			if not waitConsume(0.25, id) then break end
+		end
+		if self.RunId == id then self.Enabled = false end
+		consumeBusy = false
+		self.Progress = -1
+		updateConsumeUI("Disabled")
+	end)
+end
+
+function Consume:Stop()
+	self.Enabled = false
+	self.RunId += 1
+	consumeBusy = false
+	self.Progress = -1
+	updateConsumeUI("Disabled")
+end
+
 local Window = Library:Window({ Name="Solix Hub | Candy Farm", Game="Some Town" })
 local Page = Window:CreatePage({ Name="Candy Farm" })
 local Controls = Page:CreateSection({ Name="Automation", Side=1, Collapsed=false })
+local Survival = Page:CreateSection({ Name="Auto Eat / Drink", Side=1, Collapsed=false })
 local Monitor = Page:CreateSection({ Name="Monitor", Side=2, Collapsed=false })
 
 Controls:Toggle({ Name="Auto Farm Candy", Flag="SolixAutoCandy", Default=false,
@@ -789,7 +1033,21 @@ Controls:Slider({ Name="Server Cooldown", Flag="SolixCandyCooldown", Min=20, Max
 Controls:Slider({ Name="Teleport Y Offset", Flag="SolixCandyYOffset", Min=0, Max=8, Default=0, Suffix=" studs", Compact=true,
 	Callback=function(value) Farm.Settings.YOffset=value end })
 
+Survival:Toggle({ Name="Auto Eat / Drink", Flag="SolixAutoConsume", Default=false,
+	Tooltip="Read the dumped Hunger/Thirsty bars. Food must be in slot 6 and water in slot 7.",
+	Callback=function(value) if value then Consume:Start() else Consume:Stop() end end })
+Survival:Slider({ Name="Eat Below", Flag="SolixHungerThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
+	Callback=function(value) Consume.HungerThreshold=math.floor(value); updateConsumeUI() end })
+Survival:Slider({ Name="Drink Below", Flag="SolixThirstThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
+	Callback=function(value) Consume.ThirstThreshold=math.floor(value); updateConsumeUI() end })
+Survival:Label({ Name="Food: slot 6", Description="Put Curry/rice food in hotbar slot 6" })
+Survival:Label({ Name="Water: slot 7", Description="Put the drink item in hotbar slot 7" })
+
 statusLabel = Monitor:Label("Status: Idle")
+consumeStatusLabel = Monitor:Label({ Name="Consume: Disabled", Description="Auto Eat / Drink state" })
+hungerLabel = Monitor:Label({ Name="Hunger: Unknown | eat below 30%", Description="PlayerGui/Status/Main/Status/Hunger/Bar" })
+thirstLabel = Monitor:Label({ Name="Thirst: Unknown | drink below 30%", Description="PlayerGui/Status/Main/Status/Thirsty/Bar" })
+consumeProgressLabel = Monitor:Label({ Name="Consume progress: Idle", Description="PlayerGui/UIList/Main/Progress" })
 for _, crop in ipairs(CROPS) do
 	local label = Monitor:Label({ Name=crop[1]..": 0 / 100", Description="Candy ingredient" })
 	countLabels[crop[1]] = label
@@ -802,4 +1060,6 @@ Monitor:Label({ Name="External flow", Description="Cauliflower > Peach > Orange 
 Library:CreateSettingsPage(Window)
 Window:SetOpen(true)
 updateStatus()
+refreshConsumeValues()
+updateConsumeUI()
 return Farm
