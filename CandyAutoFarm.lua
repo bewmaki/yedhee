@@ -5,7 +5,6 @@ local Players = game:GetService("Players")
 local VIM = game:GetService("VirtualInputManager")
 local VirtualUser = game:GetService("VirtualUser")
 local UserInputService = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
@@ -2026,11 +2025,10 @@ function Spectate:Shutdown()
 end
 
 local GPS = {
+	MapScale = 7.26191,
 	MaxDistance = 25000,
 	YOffset = 0,
 	Target = nil,
-	ConfigIcons = nil,
-	LastMarkerCenter = nil,
 	Status = "Place a marker on the in-game map",
 	Connection = nil,
 	Accumulator = 0,
@@ -2059,31 +2057,6 @@ function GPS:Notify(ok)
 	end)
 end
 
-function GPS:GetConfigIcons()
-	if self.ConfigIcons then return self.ConfigIcons end
-	local modules = ReplicatedStorage:FindFirstChild("Game_Modules")
-	local mapModule = modules and modules:FindFirstChild("MapConfig")
-	if not mapModule or not mapModule:IsA("ModuleScript") then
-		return nil, "MapConfig was not found"
-	end
-
-	local ok, config = pcall(require, mapModule)
-	if not ok or type(config) ~= "table" or type(config.Icons) ~= "table" then
-		return nil, "MapConfig could not be read"
-	end
-
-	local icons = {}
-	for _, entry in pairs(config.Icons) do
-		if type(entry) == "table" and type(entry.Name) == "string"
-			and typeof(entry.Position) == "Vector3" then
-			icons[entry.Name] = entry.Position
-		end
-	end
-	if next(icons) == nil then return nil, "MapConfig has no landmarks" end
-	self.ConfigIcons = icons
-	return icons
-end
-
 function GPS:FindMapObjects()
 	local playerGui = player:FindFirstChildOfClass("PlayerGui")
 	if not playerGui then return nil, "PlayerGui is not ready" end
@@ -2100,149 +2073,52 @@ function GPS:FindMapObjects()
 		return nil, "ViewportFrame was not found"
 	end
 
+	local userMarker = viewport:FindFirstChild("UserMarker", true)
 	local mapMarker = viewport:FindFirstChild("MapMarker", true)
-	local iconFolder = viewport:FindFirstChild("IconFolder", true)
+	local mapCamera = viewport:FindFirstChild("Camera", true) or viewport.CurrentCamera
+	local mapBase = viewport:FindFirstChild("MapBase", true)
+	if not userMarker or not userMarker:IsA("GuiObject") then return nil, "UserMarker was not found" end
 	if not mapMarker or not mapMarker:IsA("GuiObject") then return nil, "Place a GPS marker on the map" end
 	if not mapMarker.Visible then return nil, "Place a GPS marker on the map" end
-	if not iconFolder then return nil, "Map landmarks were not found" end
+	if not mapCamera or not mapCamera:IsA("Camera") then return nil, "Map camera was not found" end
+	if not mapBase or not mapBase:IsA("BasePart") then return nil, "MapBase was not found" end
 
 	return {
 		Viewport = viewport,
+		UserMarker = userMarker,
 		MapMarker = mapMarker,
-		IconFolder = iconFolder,
+		Camera = mapCamera,
+		MapBase = mapBase,
 	}
 end
 
-local function guiCenter(gui)
-	if not gui or not gui:IsA("GuiObject") then return nil end
-	local size = gui.AbsoluteSize
-	if size.X <= 0 or size.Y <= 0 then return nil end
-	local point = gui.AbsolutePosition + size / 2
-	if point.X ~= point.X or point.Y ~= point.Y then return nil end
-	return point
-end
+function GPS:UnprojectMarker(marker, mapObjects)
+	local viewport = mapObjects.Viewport
+	local viewportPosition = viewport.AbsolutePosition
+	local viewportSize = viewport.AbsoluteSize
+	if viewportSize.X <= 1 or viewportSize.Y <= 1 then return nil end
 
-local function solve3x3(matrix, values)
-	local augmented = {}
-	for row = 1, 3 do
-		augmented[row] = {
-			matrix[row][1], matrix[row][2], matrix[row][3], values[row],
-		}
-	end
+	local markerCenter = marker.AbsolutePosition + marker.AbsoluteSize / 2
+	local ndcX = ((markerCenter.X - viewportPosition.X) / viewportSize.X) * 2 - 1
+	local ndcY = 1 - ((markerCenter.Y - viewportPosition.Y) / viewportSize.Y) * 2
+	local camera = mapObjects.Camera
+	local cameraCFrame = camera.CFrame
+	local fieldOfView = math.rad(camera.FieldOfView)
+	if fieldOfView <= 0.01 or fieldOfView >= 3 then return nil end
 
-	for column = 1, 3 do
-		local pivot = column
-		for row = column + 1, 3 do
-			if math.abs(augmented[row][column]) > math.abs(augmented[pivot][column]) then
-				pivot = row
-			end
-		end
-		if math.abs(augmented[pivot][column]) < 1e-8 then return nil end
-		augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
+	local tanHalfFov = math.tan(fieldOfView * 0.5)
+	local aspect = viewportSize.X / viewportSize.Y
+	-- The external reader negates its stored back/Z vector.  Luau's
+	-- CFrame.LookVector is already the forward vector, so use it directly.
+	local rayDirection = cameraCFrame.LookVector
+		+ cameraCFrame.RightVector * (ndcX * aspect * tanHalfFov)
+		+ cameraCFrame.UpVector * (ndcY * tanHalfFov)
+	if math.abs(rayDirection.Y) < 0.0001 then return nil end
 
-		local divisor = augmented[column][column]
-		for index = column, 4 do augmented[column][index] /= divisor end
-		for row = 1, 3 do
-			if row ~= column then
-				local factor = augmented[row][column]
-				for index = column, 4 do
-					augmented[row][index] -= factor * augmented[column][index]
-				end
-			end
-		end
-	end
-	return Vector3.new(augmented[1][4], augmented[2][4], augmented[3][4])
-end
-
-function GPS:CalibrateMarker(mapObjects)
-	local configIcons, failure = self:GetConfigIcons()
-	if not configIcons then return nil, failure end
-	local viewportPosition = mapObjects.Viewport.AbsolutePosition
-	local viewportSize = mapObjects.Viewport.AbsoluteSize
-	if viewportSize.X <= 1 or viewportSize.Y <= 1 then
-		return nil, "Open the full map and wait a moment"
-	end
-
-	local samples = {}
-	for name, worldPosition in pairs(configIcons) do
-		local icon = mapObjects.IconFolder:FindFirstChild(name)
-		local screenPoint = guiCenter(icon)
-		if screenPoint then
-			samples[#samples + 1] = {
-				Screen = Vector2.new(
-					(screenPoint.X - viewportPosition.X) / viewportSize.X,
-					(screenPoint.Y - viewportPosition.Y) / viewportSize.Y
-				),
-				World = Vector2.new(worldPosition.X, worldPosition.Z),
-			}
-		end
-	end
-	if #samples < 3 then return nil, "Open the map and wait a moment" end
-
-	-- Fit a full affine transform.  The dumped GUI shows that Never Town
-	-- stretches the full-map viewport to each device's aspect ratio, so X and Y
-	-- cannot share the same scale as they did in the old GPS implementation.
-	local sumU2, sumUV, sumU = 0, 0, 0
-	local sumV2, sumV = 0, 0
-	local worldXU, worldXV, worldX = 0, 0, 0
-	local worldZU, worldZV, worldZ = 0, 0, 0
-	for _, sample in ipairs(samples) do
-		local u, v = sample.Screen.X, sample.Screen.Y
-		sumU2 += u * u
-		sumUV += u * v
-		sumU += u
-		sumV2 += v * v
-		sumV += v
-		worldXU += sample.World.X * u
-		worldXV += sample.World.X * v
-		worldX += sample.World.X
-		worldZU += sample.World.Y * u
-		worldZV += sample.World.Y * v
-		worldZ += sample.World.Y
-	end
-	local normal = {
-		{ sumU2, sumUV, sumU },
-		{ sumUV, sumV2, sumV },
-		{ sumU, sumV, #samples },
-	}
-	local coefficientsX = solve3x3(normal, { worldXU, worldXV, worldX })
-	local coefficientsZ = solve3x3(normal, { worldZU, worldZV, worldZ })
-	if not coefficientsX or not coefficientsZ then
-		return nil, "Open the full map and wait a moment"
-	end
-
-	local averageError = 0
-	for _, sample in ipairs(samples) do
-		local u, v = sample.Screen.X, sample.Screen.Y
-		local predicted = Vector2.new(
-			coefficientsX.X * u + coefficientsX.Y * v + coefficientsX.Z,
-			coefficientsZ.X * u + coefficientsZ.Y * v + coefficientsZ.Z
-		)
-		averageError += (predicted - sample.World).Magnitude
-	end
-	averageError /= #samples
-	if averageError > 200 then return nil, "Open the full map and wait one second" end
-
-	local markerCenter = guiCenter(mapObjects.MapMarker)
-	if not markerCenter then return nil, "GPS marker is not ready" end
-	local markerU = (markerCenter.X - viewportPosition.X) / viewportSize.X
-	local markerV = (markerCenter.Y - viewportPosition.Y) / viewportSize.Y
-	local target = Vector2.new(
-		coefficientsX.X * markerU + coefficientsX.Y * markerV + coefficientsX.Z,
-		coefficientsZ.X * markerU + coefficientsZ.Y * markerV + coefficientsZ.Z
-	)
-	self.LastMarkerCenter = markerCenter
-	return target
-end
-
-function GPS:FindLandingY(x, z, character, fallbackY)
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = character and { character } or {}
-	params.IgnoreWater = false
-	local result = Workspace:Raycast(Vector3.new(x, 3000, z), Vector3.new(0, -6000, 0), params)
-	if result then return result.Position.Y + 4 + self.YOffset end
-	return fallbackY + self.YOffset
+	local distance = (mapObjects.MapBase.Position.Y - cameraCFrame.Position.Y) / rayDirection.Y
+	if distance <= 0 or distance ~= distance or distance == math.huge then return nil end
+	local point = cameraCFrame.Position + rayDirection * distance
+	return Vector2.new(point.X, point.Z)
 end
 
 function GPS:ResolveTarget(updateUI)
@@ -2258,14 +2134,18 @@ function GPS:ResolveTarget(updateUI)
 		return nil
 	end
 
-	local targetXZ, conversionFailure = self:CalibrateMarker(mapObjects)
-	if not targetXZ then
-		if updateUI ~= false then self:SetStatus(conversionFailure or "Map marker conversion failed") end
+	local playerMapPoint = self:UnprojectMarker(mapObjects.UserMarker, mapObjects)
+	local targetMapPoint = self:UnprojectMarker(mapObjects.MapMarker, mapObjects)
+	if not playerMapPoint or not targetMapPoint then
+		if updateUI ~= false then self:SetStatus("Map marker conversion failed") end
 		return nil
 	end
 
-	local targetY = self:FindLandingY(targetXZ.X, targetXZ.Y, character, root.Position.Y)
-	local target = Vector3.new(targetXZ.X, targetY, targetXZ.Y)
+	local target = Vector3.new(
+		root.Position.X - (targetMapPoint.Y - playerMapPoint.Y) * self.MapScale,
+		root.Position.Y + self.YOffset,
+		root.Position.Z + (targetMapPoint.X - playerMapPoint.X) * self.MapScale
+	)
 	local distance = (Vector3.new(target.X, root.Position.Y, target.Z) - root.Position).Magnitude
 	if distance > self.MaxDistance or distance ~= distance then
 		if updateUI ~= false then self:SetStatus("Marker is outside the safe range") end
@@ -2287,18 +2167,20 @@ function GPS:Teleport()
 	Spectate:Stop(true)
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
-	local rotation = character:GetPivot().Rotation
-	local ok = pcall(function() character:PivotTo(CFrame.new(target) * rotation) end)
-	if not ok then self:SetStatus("Teleport failed"); return false end
-	task.wait(0.25)
-	if root.Parent and (root.Position - target).Magnitude > 35 then
-		ok = pcall(function()
-			root.CFrame = CFrame.new(target) * root.CFrame.Rotation
+	local rotation = root.CFrame.Rotation
+	local ok = pcall(function()
+		-- Match the external's direct GPS path: write the root position 15 times
+		-- at 10 ms intervals to prevent dragging/rubber-banding.
+		for _ = 1, 15 do
+			root.CFrame = CFrame.new(target) * rotation
 			root.AssemblyLinearVelocity = Vector3.zero
 			root.AssemblyAngularVelocity = Vector3.zero
-		end)
-	end
-	if not ok or not root.Parent or (root.Position - target).Magnitude > 80 then
+			task.wait(0.01)
+		end
+	end)
+	if not ok then self:SetStatus("Teleport failed"); return false end
+	task.wait(0.1)
+	if not root.Parent or (root.Position - target).Magnitude > 80 then
 		self:SetStatus("Teleport was rejected")
 		return false
 	end
