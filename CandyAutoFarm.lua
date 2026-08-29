@@ -1181,7 +1181,10 @@ local ESP = {
 	MaxRendered = IS_MOBILE and 10 or 18,
 	Objects = {},
 	Connection = nil,
+	RenderConnection = nil,
 	Accumulator = 0,
+	RenderAccumulator = 0,
+	RenderInterval = IS_MOBILE and (1 / 30) or (1 / 60),
 	UpdateInterval = IS_MOBILE and 0.24 or 0.16,
 	StatsInterval = IS_MOBILE and 1.0 or 0.7,
 	ProxyCharacters = {},
@@ -1398,6 +1401,7 @@ function ESP:CreatePlayer(target)
 		HealthBack = healthBack, HealthFill = healthFill, HealthText = healthText,
 		ArmorBack = armorBack, ArmorFill = armorFill, ArmorText = armorText,
 		NextStatsUpdate = 0,
+		Active = false,
 	}
 	self.Objects[target] = object
 	return object
@@ -1448,6 +1452,40 @@ local function projectESPBox(camera, root, cameraDistance)
 	return left, y, width, height
 end
 
+function ESP:UpdateObjectPosition(object, camera)
+	local root = object and object.Root
+	local humanoid = object and object.Humanoid
+	if not self.Enabled or not object.Active or not camera or not root
+		or not root.Parent or not humanoid or humanoid.Health <= 0 then
+		if object and object.Gui and object.Gui.Visible then object.Gui.Visible = false end
+		return false, math.huge
+	end
+
+	local cameraDistance = (root.Position - camera.CFrame.Position).Magnitude
+	local left, top, boxWidth, boxHeight = projectESPBox(camera, root, cameraDistance)
+	local onRange = left ~= nil and cameraDistance <= self.MaxDistance
+	if object.Gui.Visible ~= onRange then object.Gui.Visible = onRange end
+	if not onRange then return false, cameraDistance end
+
+	local pixelThreshold = IS_MOBILE and 0.35 or 0.2
+	if not object.LastLeft or math.abs(left - object.LastLeft) >= pixelThreshold
+		or math.abs(top - object.LastTop) >= pixelThreshold then
+		object.LastLeft, object.LastTop = left, top
+		object.Gui.Position = UDim2.fromOffset(left, top)
+	end
+	if not object.LastWidth or math.abs(boxWidth - object.LastWidth) >= 0.5
+		or math.abs(boxHeight - object.LastHeight) >= 0.5 then
+		object.LastWidth, object.LastHeight = boxWidth, boxHeight
+		object.Gui.Size = UDim2.fromOffset(boxWidth, boxHeight)
+		local barWidth = IS_MOBILE and 7 or 5
+		object.HealthBack.Position = UDim2.fromOffset(-barWidth - 4, 0)
+		object.HealthBack.Size = UDim2.fromOffset(barWidth, boxHeight)
+		object.ArmorBack.Position = UDim2.fromOffset(boxWidth + 4, 0)
+		object.ArmorBack.Size = UDim2.fromOffset(barWidth, boxHeight)
+	end
+	return true, cameraDistance
+end
+
 function ESP:RefreshPlayer(target, localRoot)
 	if target == player then return end
 	local character = resolvePlayerCharacter(target)
@@ -1479,29 +1517,10 @@ function ESP:RefreshPlayer(target, localRoot)
 		object.NextStatsUpdate = 0
 	end
 
+	object.Active = true
 	local distance = localRoot and (root.Position - localRoot.Position).Magnitude or math.huge
-	local camera = Workspace.CurrentCamera
-	local cameraDistance = camera and (root.Position - camera.CFrame.Position).Magnitude or math.huge
-	local left, top, boxWidth, boxHeight
-	if camera then left, top, boxWidth, boxHeight = projectESPBox(camera, root, cameraDistance) end
-	local onRange = self.Enabled and left ~= nil and cameraDistance <= self.MaxDistance
-	if object.Gui.Visible ~= onRange then object.Gui.Visible = onRange end
+	local onRange, cameraDistance = self:UpdateObjectPosition(object, Workspace.CurrentCamera)
 	if not onRange then return character end
-	if not object.LastLeft or math.abs(left - object.LastLeft) >= 1
-		or math.abs(top - object.LastTop) >= 1 then
-		object.LastLeft, object.LastTop = left, top
-		object.Gui.Position = UDim2.fromOffset(left, top)
-	end
-	if not object.LastWidth or math.abs(boxWidth - object.LastWidth) >= 1
-		or math.abs(boxHeight - object.LastHeight) >= 1 then
-		object.LastWidth, object.LastHeight = boxWidth, boxHeight
-		object.Gui.Size = UDim2.fromOffset(boxWidth, boxHeight)
-		local barWidth = IS_MOBILE and 7 or 5
-		object.HealthBack.Position = UDim2.fromOffset(-barWidth - 4, 0)
-		object.HealthBack.Size = UDim2.fromOffset(barWidth, boxHeight)
-		object.ArmorBack.Position = UDim2.fromOffset(boxWidth + 4, 0)
-		object.ArmorBack.Size = UDim2.fromOffset(barWidth, boxHeight)
-	end
 
 	if object.Name.Visible ~= self.ShowName then object.Name.Visible = self.ShowName end
 	if object.Distance.Visible ~= self.ShowDistance then object.Distance.Visible = self.ShowDistance end
@@ -1584,6 +1603,7 @@ function ESP:RefreshAll()
 	end
 	local localReference = localRoot or (camera and { Position = camera.CFrame.Position })
 	local present = {}
+	for _, object in pairs(self.Objects) do object.Active = false end
 	local playerNames = { [player.Name] = true }
 	local candidates = {}
 	local cameraPosition = camera and camera.CFrame.Position
@@ -1640,6 +1660,7 @@ function ESP:Start()
 	if self.Enabled and self.Connection then return end
 	self.Enabled = true
 	self.Accumulator = 0
+	self.RenderAccumulator = 0
 	self.NextStatusUpdate = 0
 	self.WorldModels = {}
 	self.BestWorldByName = {}
@@ -1673,11 +1694,22 @@ function ESP:Start()
 		self.Accumulator = 0
 		self:RefreshAll()
 	end)
+	if self.RenderConnection then self.RenderConnection:Disconnect() end
+	self.RenderConnection = RunService.RenderStepped:Connect(function(delta)
+		self.RenderAccumulator += delta
+		if self.RenderAccumulator < self.RenderInterval then return end
+		self.RenderAccumulator = 0
+		local camera = Workspace.CurrentCamera
+		for _, object in pairs(self.Objects) do
+			if object.Active then self:UpdateObjectPosition(object, camera) end
+		end
+	end)
 end
 
 function ESP:Stop()
 	self.Enabled = false
 	if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
+	if self.RenderConnection then self.RenderConnection:Disconnect(); self.RenderConnection = nil end
 	if self.WorldAddedConnection then self.WorldAddedConnection:Disconnect(); self.WorldAddedConnection = nil end
 	if self.WorldRemovedConnection then self.WorldRemovedConnection:Disconnect(); self.WorldRemovedConnection = nil end
 	if self.ArmorAddedConnection then self.ArmorAddedConnection:Disconnect(); self.ArmorAddedConnection = nil end
