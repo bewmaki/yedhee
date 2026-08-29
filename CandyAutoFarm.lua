@@ -1180,7 +1180,7 @@ local ESP = {
 	Objects = {},
 	Connection = nil,
 	Accumulator = 0,
-	UpdateInterval = IS_MOBILE and 0.2 or 0.12,
+	UpdateInterval = IS_MOBILE and (1 / 15) or (1 / 24),
 	ProxyCharacters = {},
 	NextProxyScan = {},
 	RootGui = nil,
@@ -1196,7 +1196,7 @@ local function readReplicatedNumber(containers, names)
 			for _, name in ipairs(names) do
 				local ok, attribute = pcall(container.GetAttribute, container, name)
 				if ok and type(attribute) == "number" then return attribute end
-				local valueObject = container:FindFirstChild(name, true)
+				local valueObject = container:FindFirstChild(name)
 				if valueObject then
 					local valueOk, value = pcall(function() return valueObject.Value end)
 					if valueOk and type(value) == "number" then return value end
@@ -1235,9 +1235,9 @@ function ESP:ResolveWorkspaceProxy(target, force)
 	if not force and now < (self.NextProxyScan[target] or 0) then return nil end
 	self.NextProxyScan[target] = now + 8
 
-	-- Find only the requested player.  Scanning every descendant for every ESP
-	-- refresh caused a visible hitch on Never Town's large Workspace.
-	local candidate = Workspace:FindFirstChild(target.Name, true)
+	-- Never Town's dump exposes live player proxies as direct Workspace children:
+	-- Workspace.<player name>. Avoid every recursive lookup in the render loop.
+	local candidate = Workspace:FindFirstChild(target.Name)
 	if candidate and candidate:IsA("Model") and usableCharacter(candidate) then
 		self.ProxyCharacters[target] = candidate
 		return candidate
@@ -1358,7 +1358,7 @@ function ESP:CreatePlayer(target, adornee)
 end
 
 function ESP:GetArmor(target, character, humanoid)
-	local dumpedArmor = character and character:FindFirstChild("AmmorHeal", true)
+	local dumpedArmor = character and character:FindFirstChild("AmmorHeal")
 	if dumpedArmor then
 		local valueOk, value = pcall(function() return dumpedArmor.Value end)
 		if valueOk and type(value) == "number" then
@@ -1375,7 +1375,7 @@ function ESP:GetArmor(target, character, humanoid)
 	return math.clamp(armor, 0, maximum), maximum
 end
 
-local function projectESPPoint(camera, character, root, adornee, distance)
+local function projectESPPoint(camera, root, adornee, cameraDistance)
 	local candidates = {
 		adornee and (adornee.Position + Vector3.new(0, 0.75, 0)),
 		adornee and adornee.Position,
@@ -1392,7 +1392,7 @@ local function projectESPPoint(camera, character, root, adornee, distance)
 	-- When the camera clips into a nearby character every centre point may be
 	-- behind the near plane although the body is still visible. Keep its ESP
 	-- at screen centre instead of blinking off.
-	if distance <= 12 then
+	if cameraDistance <= 25 then
 		local viewport = camera.ViewportSize
 		return Vector3.new(viewport.X * 0.5, viewport.Y * 0.5, 0.05)
 	end
@@ -1418,8 +1418,11 @@ function ESP:RefreshPlayer(target, localRoot)
 
 	local distance = localRoot and (root.Position - localRoot.Position).Magnitude or math.huge
 	local camera = Workspace.CurrentCamera
-	local screenPoint = camera and projectESPPoint(camera, character, root, adornee, distance)
-	local onRange = self.Enabled and camera ~= nil and screenPoint ~= nil and distance <= self.MaxDistance
+	local cameraDistance = camera and (root.Position - camera.CFrame.Position).Magnitude or math.huge
+	local screenPoint = camera and projectESPPoint(camera, root, adornee, cameraDistance)
+	-- Camera distance is stable even when Never Town temporarily parks the local
+	-- Player.Character proxy at a remote coordinate during streaming.
+	local onRange = self.Enabled and camera ~= nil and screenPoint ~= nil and cameraDistance <= self.MaxDistance
 	object.Gui.Visible = onRange
 	if not onRange then return end
 	local viewport = camera.ViewportSize
