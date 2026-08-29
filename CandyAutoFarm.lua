@@ -1178,19 +1178,24 @@ local ESP = {
 	ShowArmor = true,
 	ShowBox = true,
 	MaxDistance = 1000,
+	MaxRendered = IS_MOBILE and 10 or 18,
 	Objects = {},
 	Connection = nil,
 	Accumulator = 0,
-	UpdateInterval = IS_MOBILE and 0.18 or 0.12,
-	StatsInterval = IS_MOBILE and 0.6 or 0.4,
+	UpdateInterval = IS_MOBILE and 0.24 or 0.16,
+	StatsInterval = IS_MOBILE and 1.0 or 0.7,
 	ProxyCharacters = {},
 	NextProxyScan = {},
 	RootGui = nil,
 	NextStatusUpdate = 0,
 	WorldModels = {},
+	BestWorldByName = {},
+	NextWorldSelection = 0,
 	WorldAddedConnection = nil,
 	WorldRemovedConnection = nil,
 	ArmorAddedConnection = nil,
+	LocalCharacter = nil,
+	LocalRoot = nil,
 }
 
 local ARMOR_NAMES = { "AmmorHeal", "Armor", "Armour", "ArmorValue", "ArmourValue", "Shield", "Vest", "Protection" }
@@ -1234,6 +1239,11 @@ end
 
 function ESP:ResolveWorkspaceProxy(target, force)
 	if not target then return nil end
+	local best = self.BestWorldByName[target.Name]
+	if best and best.Parent then
+		self.ProxyCharacters[target] = best
+		return best
+	end
 	local cached = self.ProxyCharacters[target]
 	if cached and cached.Parent then return cached end
 
@@ -1417,28 +1427,19 @@ end
 
 local function projectESPBox(camera, root, cameraDistance)
 	local viewport = camera.ViewportSize
-	local top = camera:WorldToViewportPoint(root.Position + Vector3.new(0, 3.2, 0))
-	local bottom = camera:WorldToViewportPoint(root.Position - Vector3.new(0, 3.4, 0))
 	local centre = camera:WorldToViewportPoint(root.Position)
-	local centreX, centreY, height
-
-	if top.Z > 0.05 and bottom.Z > 0.05 then
-		height = math.abs(bottom.Y - top.Y)
-		centreX = (top.X + bottom.X) * 0.5
-		centreY = (top.Y + bottom.Y) * 0.5
-	end
-	if not height or height < 12 or height ~= height then
-		height = math.clamp(1800 / math.max(cameraDistance, 1), IS_MOBILE and 58 or 45, viewport.Y * 0.82)
-		if centre.Z > 0.05 then
-			centreX, centreY = centre.X, centre.Y
-		elseif cameraDistance <= 32 then
-			centreX, centreY = viewport.X * 0.5, viewport.Y * 0.48
-		else
-			return nil
-		end
+	local centreX, centreY
+	if centre.Z > 0.05 then
+		centreX, centreY = centre.X, centre.Y
+	elseif cameraDistance <= 32 then
+		centreX, centreY = viewport.X * 0.5, viewport.Y * 0.48
+	else
+		return nil
 	end
 
-	height = math.clamp(height, IS_MOBILE and 58 or 45, viewport.Y * 0.82)
+	-- One projection per target. Screen height is derived from distance to avoid
+	-- two extra W2S calls and expensive UI spikes on mobile executors.
+	local height = math.clamp(1800 / math.max(cameraDistance, 1), IS_MOBILE and 58 or 45, viewport.Y * 0.82)
 	local width = math.clamp(height * 0.56, IS_MOBILE and 36 or 30, viewport.X * 0.35)
 	local sideMargin = IS_MOBILE and 68 or 55
 	local topMargin = IS_MOBILE and 30 or 24
@@ -1484,21 +1485,29 @@ function ESP:RefreshPlayer(target, localRoot)
 	local left, top, boxWidth, boxHeight
 	if camera then left, top, boxWidth, boxHeight = projectESPBox(camera, root, cameraDistance) end
 	local onRange = self.Enabled and left ~= nil and cameraDistance <= self.MaxDistance
-	object.Gui.Visible = onRange
+	if object.Gui.Visible ~= onRange then object.Gui.Visible = onRange end
 	if not onRange then return character end
-	object.Gui.Position = UDim2.fromOffset(left, top)
-	object.Gui.Size = UDim2.fromOffset(boxWidth, boxHeight)
-	local barWidth = IS_MOBILE and 7 or 5
-	object.HealthBack.Position = UDim2.fromOffset(-barWidth - 4, 0)
-	object.HealthBack.Size = UDim2.fromOffset(barWidth, boxHeight)
-	object.ArmorBack.Position = UDim2.fromOffset(boxWidth + 4, 0)
-	object.ArmorBack.Size = UDim2.fromOffset(barWidth, boxHeight)
+	if not object.LastLeft or math.abs(left - object.LastLeft) >= 1
+		or math.abs(top - object.LastTop) >= 1 then
+		object.LastLeft, object.LastTop = left, top
+		object.Gui.Position = UDim2.fromOffset(left, top)
+	end
+	if not object.LastWidth or math.abs(boxWidth - object.LastWidth) >= 1
+		or math.abs(boxHeight - object.LastHeight) >= 1 then
+		object.LastWidth, object.LastHeight = boxWidth, boxHeight
+		object.Gui.Size = UDim2.fromOffset(boxWidth, boxHeight)
+		local barWidth = IS_MOBILE and 7 or 5
+		object.HealthBack.Position = UDim2.fromOffset(-barWidth - 4, 0)
+		object.HealthBack.Size = UDim2.fromOffset(barWidth, boxHeight)
+		object.ArmorBack.Position = UDim2.fromOffset(boxWidth + 4, 0)
+		object.ArmorBack.Size = UDim2.fromOffset(barWidth, boxHeight)
+	end
 
-	object.Name.Visible = self.ShowName
-	object.Distance.Visible = self.ShowDistance
-	object.Box.Visible = self.ShowBox
-	object.HealthBack.Visible = self.ShowHealth
-	object.ArmorBack.Visible = self.ShowArmor
+	if object.Name.Visible ~= self.ShowName then object.Name.Visible = self.ShowName end
+	if object.Distance.Visible ~= self.ShowDistance then object.Distance.Visible = self.ShowDistance end
+	if object.Box.Visible ~= self.ShowBox then object.Box.Visible = self.ShowBox end
+	if object.HealthBack.Visible ~= self.ShowHealth then object.HealthBack.Visible = self.ShowHealth end
+	if object.ArmorBack.Visible ~= self.ShowArmor then object.ArmorBack.Visible = self.ShowArmor end
 
 	local now = os.clock()
 	if now >= (object.NextStatsUpdate or 0) then
@@ -1527,37 +1536,91 @@ end
 function ESP:TrackWorldModel(instance)
 	if instance and instance:IsA("Model") and instance.Parent == Workspace
 		and instance:FindFirstChild("AmmorHeal") then
-		self.WorldModels[instance] = true
+		self.WorldModels[instance] = self.WorldModels[instance] or {}
 	end
 end
 
+function ESP:BuildBestWorldModels(camera)
+	local now = os.clock()
+	if now < self.NextWorldSelection then return end
+	self.NextWorldSelection = now + 0.5
+	local best, bestDistance = {}, {}
+	local cameraPosition = camera and camera.CFrame.Position
+	for model, record in pairs(self.WorldModels) do
+		if model.Parent ~= Workspace then
+			self.WorldModels[model] = nil
+		else
+			local root = record.Root
+			if not root or root.Parent ~= model then
+				root = findCharacterRoot(model)
+				record.Root = root
+			end
+			if root and cameraPosition then
+				local position = root.Position
+				local usable = math.abs(position.X) < 1000000
+					and math.abs(position.Y) < 1000000 and math.abs(position.Z) < 1000000
+				if usable then
+					local distance = (position - cameraPosition).Magnitude
+					local name = model.Name
+					if not bestDistance[name] or distance < bestDistance[name] then
+						bestDistance[name] = distance
+						best[name] = model
+					end
+				end
+			end
+		end
+	end
+	self.BestWorldByName = best
+end
+
 function ESP:RefreshAll()
-	local localCharacter = resolvePlayerCharacter(player)
-	local localRoot = findCharacterRoot(localCharacter)
 	local camera = Workspace.CurrentCamera
+	self:BuildBestWorldModels(camera)
+	local localCharacter = resolvePlayerCharacter(player)
+	local localRoot = self.LocalRoot
+	if self.LocalCharacter ~= localCharacter or not localRoot or localRoot.Parent ~= localCharacter then
+		localRoot = findCharacterRoot(localCharacter)
+		self.LocalCharacter, self.LocalRoot = localCharacter, localRoot
+	end
 	local localReference = localRoot or (camera and { Position = camera.CFrame.Position })
 	local present = {}
-	local usedCharacters = {}
-	local total = 0
+	local playerNames = { [player.Name] = true }
+	local candidates = {}
+	local cameraPosition = camera and camera.CFrame.Position
+	local function addCandidate(target, model)
+		local root
+		local record = model and self.WorldModels[model]
+		if record then root = record.Root end
+		if not root or root.Parent ~= model then root = findCharacterRoot(model) end
+		local distance = root and cameraPosition and (root.Position - cameraPosition).Magnitude or math.huge
+		candidates[#candidates + 1] = { Target = target, Distance = distance }
+	end
 	for _, target in ipairs(Players:GetPlayers()) do
 		if target ~= player then
-			total += 1
-			present[target] = true
-			local character = self:RefreshPlayer(target, localReference)
-			if character then usedCharacters[character] = true end
+			playerNames[target.Name] = true
+			addCandidate(target, self.BestWorldByName[target.Name] or target.Character)
 		end
 	end
 	-- Streaming fallback from the dump: live Never Town characters are direct
 	-- Workspace models with AmmorHeal. This catches a close-range replacement
 	-- even when Player.Character still references the parked proxy.
-	for model in pairs(self.WorldModels) do
-		if model.Parent ~= Workspace then
-			self.WorldModels[model] = nil
-		elseif model ~= localCharacter and model ~= player.Character
-			and model.Name ~= player.Name and not usedCharacters[model] then
-			total += 1
-			present[model] = true
-			self:RefreshPlayer(model, localReference)
+	for modelName, model in pairs(self.BestWorldByName) do
+		if not playerNames[modelName] and model.Parent == Workspace
+			and model ~= localCharacter and model ~= player.Character
+		then
+			addCandidate(model, model)
+		end
+	end
+	table.sort(candidates, function(a, b) return a.Distance < b.Distance end)
+	local total = #candidates
+	for index, candidate in ipairs(candidates) do
+		local target = candidate.Target
+		present[target] = true
+		if index <= self.MaxRendered then
+			self:RefreshPlayer(target, localReference)
+		else
+			local object = self.Objects[target]
+			if object and object.Gui.Visible then object.Gui.Visible = false end
 		end
 	end
 	for target in pairs(self.Objects) do
@@ -1579,6 +1642,9 @@ function ESP:Start()
 	self.Accumulator = 0
 	self.NextStatusUpdate = 0
 	self.WorldModels = {}
+	self.BestWorldByName = {}
+	self.NextWorldSelection = 0
+	self.LocalCharacter, self.LocalRoot = nil, nil
 	for _, child in ipairs(Workspace:GetChildren()) do self:TrackWorldModel(child) end
 	if self.WorldAddedConnection then self.WorldAddedConnection:Disconnect() end
 	self.WorldAddedConnection = Workspace.ChildAdded:Connect(function(child)
@@ -1595,7 +1661,7 @@ function ESP:Start()
 		if descendant.Name == "AmmorHeal" then
 			local model = descendant.Parent
 			if model and model:IsA("Model") and model.Parent == Workspace then
-				self.WorldModels[model] = true
+				self:TrackWorldModel(model)
 			end
 		end
 	end)
@@ -1622,6 +1688,9 @@ function ESP:Stop()
 	self.ProxyCharacters = {}
 	self.NextProxyScan = {}
 	self.WorldModels = {}
+	self.BestWorldByName = {}
+	self.NextWorldSelection = 0
+	self.LocalCharacter, self.LocalRoot = nil, nil
 	if espStatusLabel then espStatusLabel:SetText("ESP: OFF") end
 end
 
@@ -1671,6 +1740,8 @@ ESPControls:Toggle({ Name="Armor", Flag="AraiESPArmor", Default=true,
 	Callback=function(value) ESP.ShowArmor=value; if ESP.Enabled then ESP:RefreshAll() end end })
 ESPControls:Slider({ Name="Max Distance", Flag="AraiESPMaxDistance", Min=100, Max=5000, Default=1000, Suffix="m", Compact=true,
 	Callback=function(value) ESP.MaxDistance=math.floor(value); if ESP.Enabled then ESP:RefreshAll() end end })
+ESPControls:Slider({ Name="Max Players", Flag="AraiESPMaxPlayers", Min=5, Max=30, Default=IS_MOBILE and 10 or 18, Suffix="", Compact=true,
+	Callback=function(value) ESP.MaxRendered=math.floor(value); if ESP.Enabled then ESP:RefreshAll() end end })
 ESPInfo:Label({ Name="Box ESP", Description="Purple 2D frame follows each streamed player model" })
 ESPInfo:Label({ Name="Health", Description="Vertical HP bar on the left side of the player" })
 ESPInfo:Label({ Name="Armor", Description="Vertical armor bar on the right side of the player" })
