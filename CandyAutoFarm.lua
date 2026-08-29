@@ -1181,6 +1181,8 @@ local ESP = {
 	Connection = nil,
 	Accumulator = 0,
 	UpdateInterval = IS_MOBILE and 0.16 or 0.1,
+	ProxyCharacters = {},
+	NextProxyScan = 0,
 }
 
 local ARMOR_NAMES = { "AmmorHeal", "Armor", "Armour", "ArmorValue", "ArmourValue", "Shield", "Vest", "Protection" }
@@ -1203,13 +1205,46 @@ local function readReplicatedNumber(containers, names)
 	return nil
 end
 
-local function resolvePlayerCharacter(target)
-	local character = target and target.Character
-	if character and character.Parent then return character end
-	local workspaceCharacter = target and Workspace:FindFirstChild(target.Name)
-	if workspaceCharacter and workspaceCharacter:IsA("Model") and workspaceCharacter:FindFirstChildOfClass("Humanoid") then
-		return workspaceCharacter
+local function findCharacterRoot(character)
+	if not character then return nil end
+	for _, name in ipairs({ "HumanoidRootPart", "UpperTorso", "Torso", "LowerTorso", "Head" }) do
+		local part = character:FindFirstChild(name)
+		if part and part:IsA("BasePart") then return part end
 	end
+	return nil
+end
+
+local function usableCharacter(character)
+	local root = findCharacterRoot(character)
+	if not root then return false end
+	local position = root.Position
+	return math.abs(position.X) < 1000000
+		and math.abs(position.Y) < 1000000
+		and math.abs(position.Z) < 1000000
+		and (math.abs(position.X) >= 0.1 or math.abs(position.Y) >= 0.1 or math.abs(position.Z) >= 0.1)
+end
+
+function ESP:ScanWorkspaceProxies(force)
+	if not force and os.clock() < self.NextProxyScan then return end
+	self.NextProxyScan = os.clock() + 2
+	local wanted = {}
+	for _, target in ipairs(Players:GetPlayers()) do wanted[target.Name] = true end
+	local resolved = {}
+	for _, instance in ipairs(Workspace:GetDescendants()) do
+		if instance:IsA("Model") and wanted[instance.Name] and usableCharacter(instance) then
+			resolved[instance.Name] = instance
+		end
+	end
+	self.ProxyCharacters = resolved
+end
+
+local function resolvePlayerCharacter(target)
+	if not target then return nil end
+	ESP:ScanWorkspaceProxies(false)
+	local proxy = ESP.ProxyCharacters[target.Name]
+	if proxy and proxy.Parent and usableCharacter(proxy) then return proxy end
+	local character = target.Character
+	if character and character.Parent and usableCharacter(character) then return character end
 	return nil
 end
 
@@ -1323,7 +1358,7 @@ function ESP:RefreshPlayer(target, localRoot)
 	if target == player then return end
 	local character = resolvePlayerCharacter(target)
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-	local root = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head"))
+	local root = findCharacterRoot(character)
 	local adornee = character and (character:FindFirstChild("Head") or root)
 	if not humanoid or not root or not adornee or humanoid.Health <= 0 then
 		self:DestroyPlayer(target)
@@ -1390,6 +1425,7 @@ function ESP:Start()
 	if self.Enabled and self.Connection then return end
 	self.Enabled = true
 	self.Accumulator = 0
+	self:ScanWorkspaceProxies(true)
 	self:RefreshAll()
 	if self.Connection then self.Connection:Disconnect() end
 	self.Connection = RunService.Heartbeat:Connect(function(delta)
