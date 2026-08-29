@@ -55,6 +55,11 @@ if type(previousSpectate) == "table" then
 	end
 end
 getgenv().AraiSpectate = nil
+local previousGPS = getgenv().AraiGPS
+if type(previousGPS) == "table" and type(previousGPS.Stop) == "function" then
+	pcall(previousGPS.Stop, previousGPS)
+end
+getgenv().AraiGPS = nil
 
 local CROPS = {
 	{ "Cauliflower", Vector3.new(-4167.1, 74.5, 1250.2), Vector3.new(-4145.3, 84.5, 1253.4), Vector3.new(-0.922, -0.363, -0.136) },
@@ -86,6 +91,7 @@ getgenv().SolixCandyFarm = Farm -- legacy alias for already-running copies
 for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = 0 end
 
 local statusLabel, craftedLabel, espStatusLabel, spectateStatusLabel, spectateReadyLabel
+local gpsStatusLabel, gpsCoordinateLabel
 local spectateDropdown
 local countLabels = {}
 local consumeBusy = false
@@ -1909,10 +1915,168 @@ function Spectate:Shutdown()
 	self:Stop(true)
 end
 
+local GPS = {
+	MapScale = 7.26191,
+	MaxDistance = 25000,
+	YOffset = 0,
+	Target = nil,
+	Status = "Place a marker on the in-game map",
+	Connection = nil,
+	Accumulator = 0,
+	Page = nil,
+}
+
+function GPS:SetStatus(text)
+	self.Status = text
+	if gpsStatusLabel then gpsStatusLabel:SetText("GPS: " .. text) end
+	if gpsCoordinateLabel then
+		if self.Target then
+			gpsCoordinateLabel:SetText(string.format("Target: X %.1f | Y %.1f | Z %.1f", self.Target.X, self.Target.Y, self.Target.Z))
+		else
+			gpsCoordinateLabel:SetText("Target: Not detected")
+		end
+	end
+end
+
+function GPS:FindMapObjects()
+	local playerGui = player:FindFirstChildOfClass("PlayerGui")
+	if not playerGui then return nil, "PlayerGui is not ready" end
+
+	local mapFrame = playerGui:FindFirstChild("MapFrame", true)
+	if not mapFrame then return nil, "Open the in-game map once" end
+	local viewport = mapFrame:FindFirstChild("ViewportFrame", true)
+	if not viewport or not viewport:IsA("ViewportFrame") then
+		return nil, "ViewportFrame was not found"
+	end
+
+	local userMarker = viewport:FindFirstChild("UserMarker", true)
+	local mapMarker = viewport:FindFirstChild("MapMarker", true)
+	local mapCamera = viewport.CurrentCamera or viewport:FindFirstChild("Camera", true)
+	local mapBase = viewport:FindFirstChild("MapBase", true)
+	if not userMarker or not userMarker:IsA("GuiObject") then return nil, "UserMarker was not found" end
+	if not mapMarker or not mapMarker:IsA("GuiObject") then return nil, "Place a GPS marker on the map" end
+	if not mapMarker.Visible then return nil, "Place a GPS marker on the map" end
+	if not mapCamera or not mapCamera:IsA("Camera") then return nil, "Map camera was not found" end
+	if not mapBase or not mapBase:IsA("BasePart") then return nil, "MapBase was not found" end
+
+	return {
+		Viewport = viewport,
+		UserMarker = userMarker,
+		MapMarker = mapMarker,
+		Camera = mapCamera,
+		MapBase = mapBase,
+	}
+end
+
+function GPS:UnprojectMarker(marker, mapObjects)
+	local viewport = mapObjects.Viewport
+	local viewportPosition = viewport.AbsolutePosition
+	local viewportSize = viewport.AbsoluteSize
+	if viewportSize.X <= 1 or viewportSize.Y <= 1 then return nil end
+
+	local markerCenter = marker.AbsolutePosition + marker.AbsoluteSize / 2
+	local ndcX = ((markerCenter.X - viewportPosition.X) / viewportSize.X) * 2 - 1
+	local ndcY = 1 - ((markerCenter.Y - viewportPosition.Y) / viewportSize.Y) * 2
+	local camera = mapObjects.Camera
+	local cameraCFrame = camera.CFrame
+	local fieldOfView = math.rad(camera.FieldOfView)
+	if fieldOfView <= 0.01 or fieldOfView >= math.rad(179) then return nil end
+
+	local tanHalfFov = math.tan(fieldOfView * 0.5)
+	local aspect = viewportSize.X / viewportSize.Y
+	local rayDirection = cameraCFrame.LookVector
+		+ cameraCFrame.RightVector * (ndcX * aspect * tanHalfFov)
+		+ cameraCFrame.UpVector * (ndcY * tanHalfFov)
+	if math.abs(rayDirection.Y) < 0.0001 then return nil end
+
+	local distance = (mapObjects.MapBase.Position.Y - cameraCFrame.Position.Y) / rayDirection.Y
+	if distance <= 0 or distance ~= distance or distance == math.huge then return nil end
+	local point = cameraCFrame.Position + rayDirection * distance
+	return Vector2.new(point.X, point.Z)
+end
+
+function GPS:ResolveTarget(updateUI)
+	local character, root = characterRoot()
+	if not character or not root then
+		self.Target = nil
+		if updateUI ~= false then self:SetStatus("Character is not ready") end
+		return nil
+	end
+
+	local mapObjects, failure = self:FindMapObjects()
+	if not mapObjects then
+		self.Target = nil
+		if updateUI ~= false then self:SetStatus(failure) end
+		return nil
+	end
+
+	local playerMapPoint = self:UnprojectMarker(mapObjects.UserMarker, mapObjects)
+	local targetMapPoint = self:UnprojectMarker(mapObjects.MapMarker, mapObjects)
+	if not playerMapPoint or not targetMapPoint then
+		self.Target = nil
+		if updateUI ~= false then self:SetStatus("Map marker conversion failed") end
+		return nil
+	end
+
+	-- Same Never Town conversion used by the External: the viewport map is
+	-- rotated 90 degrees and calibrated to 7.26191 world studs per map unit.
+	local target = Vector3.new(
+		root.Position.X - (targetMapPoint.Y - playerMapPoint.Y) * self.MapScale,
+		root.Position.Y + self.YOffset,
+		root.Position.Z + (targetMapPoint.X - playerMapPoint.X) * self.MapScale
+	)
+	local distance = (Vector3.new(target.X, root.Position.Y, target.Z) - root.Position).Magnitude
+	if distance > self.MaxDistance or distance ~= distance then
+		self.Target = nil
+		if updateUI ~= false then self:SetStatus("Marker is outside the safe range") end
+		return nil
+	end
+
+	self.Target = target
+	if updateUI ~= false then self:SetStatus(string.format("Marker ready | %.0f studs", distance)) end
+	return target
+end
+
+function GPS:Teleport()
+	if Farm.Enabled then self:SetStatus("Disable Auto Farm Candy first"); return false end
+	local target = self:ResolveTarget(true)
+	if not target then return false end
+	local character, root = characterRoot()
+	if not character or not root then self:SetStatus("Character is not ready"); return false end
+
+	Spectate:Stop(true)
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	local offset = target - root.Position
+	local ok = pcall(function() character:PivotTo(character:GetPivot() + offset) end)
+	if not ok then self:SetStatus("Teleport failed"); return false end
+	task.wait(0.2)
+	self:SetStatus("Teleport complete")
+	return true
+end
+
+function GPS:Start()
+	if self.Connection then self.Connection:Disconnect() end
+	self.Accumulator = 0
+	self.Connection = RunService.Heartbeat:Connect(function(delta)
+		self.Accumulator += delta
+		if self.Accumulator < 0.75 then return end
+		self.Accumulator = 0
+		if self.Page and self.Page.Active then self:ResolveTarget(true) end
+	end)
+end
+
+function GPS:Stop()
+	if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
+	self.Target = nil
+end
+
 getgenv().AraiSpectate = Spectate
+getgenv().AraiGPS = GPS
 
 Farm.ESP = ESP
 Farm.Spectate = Spectate
+Farm.GPS = GPS
 getgenv().AraiESP = ESP
 
 local Window = Library:Window({ Name="A-RAI HUB | Never Town", Game="Never Town" })
@@ -1922,8 +2086,10 @@ local Monitor = FarmPage:CreateSection({ Name="◈ FARM MONITOR", Side=2, Collap
 
 local PlayerPage = Window:CreatePage({ Name="◉ PLAYER" })
 local SpectateControls = PlayerPage:CreateSection({ Name="◉ SPECTATE", Side=1, Collapsed=false })
+local GPSControls = PlayerPage:CreateSection({ Name="⌖ GPS TELEPORT", Side=1, Collapsed=false })
 local Survival = PlayerPage:CreateSection({ Name="♥ AUTO EAT / DRINK", Side=1, Collapsed=false })
 local SpectateInfo = PlayerPage:CreateSection({ Name="◎ WATCH STATUS", Side=2, Collapsed=false })
+local GPSInfo = PlayerPage:CreateSection({ Name="⌖ GPS STATUS", Side=2, Collapsed=false })
 local SurvivalMonitor = PlayerPage:CreateSection({ Name="＋ SURVIVAL STATUS", Side=2, Collapsed=false })
 
 local ESPPage = Window:CreatePage({ Name="◇ ESP" })
@@ -1937,6 +2103,7 @@ local HubSettings = SettingsPage:CreateSubPage({ Name="A-RAI" })
 local DeviceSettings = HubSettings:CreateSection({ Name="⚙ DEVICE & PERFORMANCE", Side=1, Collapsed=false })
 local AboutSettings = HubSettings:CreateSection({ Name="◆ A-RAI HUB", Side=2, Collapsed=false })
 Spectate.Page = PlayerPage
+GPS.Page = PlayerPage
 
 Controls:Toggle({ Name="Auto Farm Candy", Flag="AraiAutoCandy", Default=false,
 	Tooltip="Farm 5 ingredients, craft SeedCandy x5 and deposit it at REBEL.",
@@ -1972,6 +2139,13 @@ local spectateButtons = SpectateControls:CreateButton({})
 spectateButtons:Add("▶ SPECTATE PLAYER", function() Spectate:Watch() end)
 spectateButtons:Add("■ STOP SPECTATE", function() Spectate:Stop() end)
 SpectateControls:CreateButton({ Name="↻ REFRESH PLAYERS", Callback=function() Spectate:RefreshPlayers() end })
+
+GPSControls:Label({ Name="Never Town map marker", Description="Open the in-game map and place its GPS marker first." })
+GPSControls:Slider({ Name="Landing Y Offset", Flag="AraiGPSYOffset", Min=-5, Max=15, Default=0, Suffix=" studs", Compact=true,
+	Callback=function(value) GPS.YOffset=value; GPS:ResolveTarget(true) end })
+local gpsButtons = GPSControls:CreateButton({})
+gpsButtons:Add("⌖ TELEPORT TO GPS", function() GPS:Teleport() end)
+gpsButtons:Add("↻ READ MARKER", function() GPS:ResolveTarget(true) end)
 
 Survival:Toggle({ Name="Auto Eat / Drink", Flag="AraiAutoConsume", Default=false,
 	Tooltip="Read the dumped Hunger/Thirsty bars. Food must be in slot 6 and water in slot 7.",
@@ -2010,6 +2184,11 @@ spectateReadyLabel = SpectateInfo:Label({ Name="Players ready: 0 / 0", Descripti
 spectateStatusLabel = SpectateInfo:Label({ Name="Status: Idle", Description="Target camera state" })
 SpectateInfo:Label({ Name="External flow", Description="Select a ready target, save local camera, watch Humanoid/root, then restore automatically." })
 
+gpsStatusLabel = GPSInfo:Label({ Name="GPS: Place a marker on the in-game map", Description="Reads PlayerGui/MapFrame/ViewportFrame" })
+gpsCoordinateLabel = GPSInfo:Label({ Name="Target: Not detected", Description="Converted Never Town world coordinates" })
+GPSInfo:Label({ Name="External calibration: 7.26191", Description="Uses UserMarker and MapMarker with the original 90-degree map conversion." })
+GPSInfo:Label({ Name="Mobile supported", Description="Open the game map, tap a marker, then use the GPS button." })
+
 consumeStatusLabel = SurvivalMonitor:Label({ Name="Consume: Disabled", Description="Auto Eat / Drink state" })
 hungerLabel = SurvivalMonitor:Label({ Name="Hunger: Unknown | eat below 30%", Description="PlayerGui/Status/Main/Status/Hunger/Bar" })
 thirstLabel = SurvivalMonitor:Label({ Name="Thirst: Unknown | drink below 30%", Description="PlayerGui/Status/Main/Status/Thirsty/Bar" })
@@ -2032,6 +2211,7 @@ AboutSettings:Label({ Name="Mobile supported", Description="Touch-ready pages, d
 local baseLibraryUnload = Library.Unload
 function Library:Unload(...)
 	Spectate:Shutdown()
+	GPS:Stop()
 	ESP:Stop()
 	Consume:Stop()
 	Farm:Stop()
@@ -2040,9 +2220,11 @@ end
 
 Spectate:StartMonitor()
 Spectate:RefreshPlayers()
+GPS:Start()
 
 Window:SetOpen(true)
 updateStatus()
 refreshConsumeValues()
 updateConsumeUI()
+GPS:SetStatus(GPS.Status)
 return Farm
