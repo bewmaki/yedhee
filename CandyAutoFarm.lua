@@ -414,6 +414,108 @@ local function craftUI()
 	return bg and visible(bg) and bg or nil
 end
 
+local function visibleText(root, wanted)
+	wanted = string.lower(tostring(wanted))
+	for _, object in ipairs(root:GetDescendants()) do
+		if (object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox"))
+			and visible(object) and string.lower(object.Text) == wanted then
+			return object
+		end
+	end
+end
+
+local function clickableFrom(object, boundary)
+	local node = object
+	while node and node ~= boundary do
+		if node:IsA("GuiButton") then return node end
+		node = node.Parent
+	end
+	if object then
+		for _, child in ipairs(object:GetDescendants()) do
+			if child:IsA("GuiButton") and visible(child) then return child end
+		end
+	end
+	return object
+end
+
+local function findQuantityLabel(bg)
+	local frame = bg:FindFirstChild("Frame")
+	local image = frame and frame:FindFirstChild("ImageLabel")
+	local legacy = image and image:FindFirstChild("A")
+	if legacy and tonumber(legacy.Text) then return legacy, image end
+
+	local center = bg.AbsolutePosition + bg.AbsoluteSize / 2
+	local best, bestDistance
+	for _, object in ipairs(bg:GetDescendants()) do
+		if (object:IsA("TextLabel") or object:IsA("TextBox") or object:IsA("TextButton")) and visible(object) then
+			local quantity = tonumber(object.Text:match("^%s*(%d+)%s*$"))
+			if quantity and quantity >= 1 and quantity <= 5 then
+				local objectCenter = object.AbsolutePosition + object.AbsoluteSize / 2
+				local distance = (objectCenter - center).Magnitude
+				if not bestDistance or distance < bestDistance then
+					best, bestDistance = object, distance
+				end
+			end
+		end
+	end
+	return best, best and best.Parent or nil
+end
+
+local function findQuantityButton(bg, amount, container, increase)
+	for _, name in ipairs(increase and {"U", "Up", "Increase", "Plus", "+"} or {"D", "Down", "Decrease", "Minus", "-"}) do
+		local button = container and container:FindFirstChild(name, true)
+		if button and button:IsA("GuiObject") and visible(button) then return clickableFrom(button, bg) end
+	end
+
+	-- New UI has an arrow immediately to the right/left of the numeric amount.
+	local amountCenter = amount.AbsolutePosition + amount.AbsoluteSize / 2
+	local best, bestDistance
+	for _, object in ipairs(bg:GetDescendants()) do
+		if object:IsA("GuiButton") and visible(object) then
+			local objectCenter = object.AbsolutePosition + object.AbsoluteSize / 2
+			local dx, dy = objectCenter.X - amountCenter.X, math.abs(objectCenter.Y - amountCenter.Y)
+			local correctSide = increase and dx > 5 or (not increase and dx < -5)
+			if correctSide and math.abs(dx) <= 150 and dy <= 80 then
+				local distance = math.abs(dx) + dy
+				if not bestDistance or distance < bestDistance then best, bestDistance = object, distance end
+			end
+		end
+	end
+	return best
+end
+
+local function requirementsReady(bg)
+	local main = bg:FindFirstChild("Main")
+	local materials = main and main:FindFirstChild("MATERIALS")
+	local scrolling = materials and materials:FindFirstChild("ScrollingFrame")
+	local ready = 0
+	for _, crop in ipairs(CROPS) do
+		local current, required
+		local row = scrolling and scrolling:FindFirstChild(crop[1])
+		local amount = row and row:FindFirstChild("Amount")
+		if amount then current, required = parseCount(amount.Text) end
+
+		if not current then
+			local nameObject = visibleText(bg, crop[1])
+			local branch = nameObject and nameObject.Parent
+			for _ = 1, 4 do
+				if not branch or branch == bg then break end
+				for _, object in ipairs(branch:GetDescendants()) do
+					if (object:IsA("TextLabel") or object:IsA("TextButton")) and visible(object) then
+						local a, b = parseCount(object.Text)
+						if a and b then current, required = a, b; break end
+					end
+				end
+				if current then break end
+				branch = branch.Parent
+			end
+		end
+
+		if current and required and current >= required and required >= 100 then ready += 1 end
+	end
+	return ready == #CROPS
+end
+
 local function craftSeedCandy(id)
 	stage(5)
 	if not near(CRAFT[2]) and not warp(CRAFT[2], id) then return false end
@@ -433,34 +535,26 @@ local function craftSeedCandy(id)
 	end
 	local list = bg:FindFirstChild("ITlist")
 	local listFrame = list and list:FindFirstChild("Frame")
-	local seed = listFrame and exact(listFrame, "SeedCandy")
+	local seed = (listFrame and exact(listFrame, "SeedCandy")) or visibleText(bg, "SeedCandy")
 	if not seed then closeGui(bg); return false end
-	local card = seed
-	while card.Parent and card.Parent ~= listFrame and not card:IsA("GuiButton") do card = card.Parent end
+	local card = clickableFrom(seed, bg)
 	click(card); if not waitActive(0.6, id) then return false end
-	local frame = bg:FindFirstChild("Frame")
-	local image = frame and frame:FindFirstChild("ImageLabel")
-	local amount = image and image:FindFirstChild("A")
+	local amount, quantityContainer = findQuantityLabel(bg)
 	if not amount then closeGui(bg); return false end
 	for _ = 1, 8 do
 		local quantity = tonumber(amount.Text)
 		if quantity == 5 then break end
-		local adjust = image:FindFirstChild((quantity or 0) < 5 and "U" or "D")
+		local adjust = findQuantityButton(bg, amount, quantityContainer, (quantity or 0) < 5)
 		if not adjust then closeGui(bg); return false end
-		click(adjust); waitActive(0.3, id)
+		click(adjust); waitActive(0.4, id)
+		amount, quantityContainer = findQuantityLabel(bg)
+		if not amount then closeGui(bg); return false end
 	end
 	if tonumber(amount.Text) ~= 5 then closeGui(bg); return false end
+	if not waitFor(function() return requirementsReady(bg) end, 2, id) then closeGui(bg); return false end
 	local main = bg:FindFirstChild("Main")
-	local materials = main and main:FindFirstChild("MATERIALS")
-	local scrolling = materials and materials:FindFirstChild("ScrollingFrame")
-	for _, crop in ipairs(CROPS) do
-		local row = scrolling and scrolling:FindFirstChild(crop[1])
-		local amountText = row and row:FindFirstChild("Amount")
-		local current, maximum
-		if amountText then current, maximum = parseCount(amountText.Text) end
-		if not current or current < 100 or (maximum and maximum < 100) then closeGui(bg); return false end
-	end
-	local craftButton = main and main:FindFirstChild("Craft")
+	local craftText = visibleText(bg, "CRAFT")
+	local craftButton = (main and main:FindFirstChild("Craft")) or clickableFrom(craftText, bg)
 	if not craftButton or not click(craftButton) then closeGui(bg); return false end
 	if not waitActive(12, id) then return false end
 	closeGui(bg); Farm.Crafted += 5
