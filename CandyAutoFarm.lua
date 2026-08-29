@@ -46,6 +46,15 @@ if type(previousESP) == "table" and type(previousESP.Stop) == "function" then
 	pcall(previousESP.Stop, previousESP)
 end
 getgenv().AraiESP = nil
+local previousSpectate = getgenv().AraiSpectate
+if type(previousSpectate) == "table" then
+	if type(previousSpectate.Shutdown) == "function" then
+		pcall(previousSpectate.Shutdown, previousSpectate)
+	elseif type(previousSpectate.Stop) == "function" then
+		pcall(previousSpectate.Stop, previousSpectate)
+	end
+end
+getgenv().AraiSpectate = nil
 
 local CROPS = {
 	{ "Cauliflower", Vector3.new(-4167.1, 74.5, 1250.2), Vector3.new(-4145.3, 84.5, 1253.4), Vector3.new(-0.922, -0.363, -0.136) },
@@ -76,7 +85,8 @@ getgenv().AraiCandyFarm = Farm
 getgenv().SolixCandyFarm = Farm -- legacy alias for already-running copies
 for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = 0 end
 
-local statusLabel, craftedLabel, espStatusLabel
+local statusLabel, craftedLabel, espStatusLabel, spectateStatusLabel, spectateReadyLabel
+local spectateDropdown
 local countLabels = {}
 local consumeBusy = false
 
@@ -1726,17 +1736,207 @@ function ESP:Stop()
 	if espStatusLabel then espStatusLabel:SetText("ESP: OFF") end
 end
 
+local Spectate = {
+	Range = 500,
+	SelectedLabel = nil,
+	SelectedTarget = nil,
+	Target = nil,
+	TargetSubject = nil,
+	OriginalSubject = nil,
+	OriginalCameraType = nil,
+	OptionMap = {},
+	Connection = nil,
+	Accumulator = 0,
+	NextListRefresh = 0,
+	OutOfRangeSince = nil,
+	Page = nil,
+}
+
+function Spectate:SetStatus(text)
+	if spectateStatusLabel then spectateStatusLabel:SetText("Status: " .. text) end
+end
+
+function Spectate:GetLocalRoot()
+	local character = resolvePlayerCharacter(player)
+	return character, findCharacterRoot(character)
+end
+
+function Spectate:RefreshPlayers()
+	if not spectateDropdown then return end
+	local _, localRoot = self:GetLocalRoot()
+	local options, optionMap = {}, {}
+	local selectedUpdatedLabel
+	for _, target in ipairs(Players:GetPlayers()) do
+		if target ~= player then
+			local character = resolvePlayerCharacter(target)
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			local root = findCharacterRoot(character)
+			if humanoid and root and humanoid.Health > 0 and localRoot then
+				local distance = (root.Position - localRoot.Position).Magnitude
+				if distance <= self.Range then
+					local shownName = target.DisplayName ~= target.Name
+						and (target.DisplayName .. " @" .. target.Name) or target.Name
+					local label = string.format("%s | %d studs", shownName, math.floor(distance + 0.5))
+					options[#options + 1] = { Label = label, Target = target, Distance = distance }
+				end
+			end
+		end
+	end
+	table.sort(options, function(a, b)
+		if math.abs(a.Distance - b.Distance) > 0.01 then return a.Distance < b.Distance end
+		return a.Label < b.Label
+	end)
+	local labels = {}
+	for _, option in ipairs(options) do
+		labels[#labels + 1] = option.Label
+		optionMap[option.Label] = option.Target
+		if option.Target == self.SelectedTarget then selectedUpdatedLabel = option.Label end
+	end
+	if #labels == 0 then labels[1] = "No nearby players in range" end
+	self.OptionMap = optionMap
+	spectateDropdown:Refresh(labels)
+	if selectedUpdatedLabel then
+		self.SelectedLabel = selectedUpdatedLabel
+		spectateDropdown:SetValue(selectedUpdatedLabel, true)
+	else
+		self.SelectedLabel = nil
+		self.SelectedTarget = nil
+	end
+	if spectateReadyLabel then
+		spectateReadyLabel:SetText(string.format("Players ready: %d / %d", #options, math.max(0, #Players:GetPlayers() - 1)))
+	end
+end
+
+function Spectate:Watch()
+	local target = self.SelectedTarget or (self.SelectedLabel and self.OptionMap[self.SelectedLabel])
+	if not target or not target.Parent then
+		self:SetStatus("Select a ready player")
+		self:RefreshPlayers()
+		return
+	end
+	local character = resolvePlayerCharacter(target)
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local root = findCharacterRoot(character)
+	local _, localRoot = self:GetLocalRoot()
+	local subject = humanoid or root
+	if not subject or not root or not localRoot or (root.Position - localRoot.Position).Magnitude > self.Range then
+		self:SetStatus("Target is not ready or out of range")
+		self:RefreshPlayers()
+		return
+	end
+
+	local camera = Workspace.CurrentCamera
+	if not camera then self:SetStatus("Camera unavailable"); return end
+	if not self.Target then
+		self.OriginalSubject = camera.CameraSubject
+		self.OriginalCameraType = camera.CameraType
+	end
+	self.Target = target
+	self.TargetSubject = subject
+	self.OutOfRangeSince = nil
+	camera.CameraSubject = subject
+	camera.CameraType = Enum.CameraType.Custom
+	self:SetStatus("Watching " .. target.Name)
+end
+
+function Spectate:Stop(quiet)
+	local camera = Workspace.CurrentCamera
+	if camera then
+		local localCharacter = resolvePlayerCharacter(player)
+		local localHumanoid = localCharacter and localCharacter:FindFirstChildOfClass("Humanoid")
+		local localRoot = findCharacterRoot(localCharacter)
+		local restoreSubject = localHumanoid or localRoot or self.OriginalSubject
+		if restoreSubject then pcall(function() camera.CameraSubject = restoreSubject end) end
+		if self.OriginalCameraType then
+			pcall(function() camera.CameraType = self.OriginalCameraType end)
+		else
+			pcall(function() camera.CameraType = Enum.CameraType.Custom end)
+		end
+	end
+	self.Target = nil
+	self.TargetSubject = nil
+	self.OriginalSubject = nil
+	self.OriginalCameraType = nil
+	self.OutOfRangeSince = nil
+	if not quiet then self:SetStatus("Idle") end
+end
+
+function Spectate:UpdateTarget()
+	local target = self.Target
+	if not target then return end
+	if not target.Parent then self:Stop(); return end
+	local character = resolvePlayerCharacter(target)
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local root = findCharacterRoot(character)
+	local _, localRoot = self:GetLocalRoot()
+	local subject = humanoid or root
+	if not subject or not root or not localRoot or humanoid and humanoid.Health <= 0 then
+		self:Stop()
+		return
+	end
+	local distance = (root.Position - localRoot.Position).Magnitude
+	if distance > self.Range then
+		self.OutOfRangeSince = self.OutOfRangeSince or os.clock()
+		if os.clock() - self.OutOfRangeSince >= 0.25 then self:Stop() end
+		return
+	end
+	self.OutOfRangeSince = nil
+	local camera = Workspace.CurrentCamera
+	if camera and camera.CameraSubject ~= subject then
+		camera.CameraSubject = subject
+		camera.CameraType = Enum.CameraType.Custom
+	end
+	self.TargetSubject = subject
+end
+
+function Spectate:StartMonitor()
+	if self.Connection then self.Connection:Disconnect() end
+	self.Accumulator = 0
+	self.Connection = RunService.Heartbeat:Connect(function(delta)
+		self.Accumulator += delta
+		if self.Accumulator < 0.2 then return end
+		self.Accumulator = 0
+		if self.Target then self:UpdateTarget() end
+		if self.Page and self.Page.Active and os.clock() >= self.NextListRefresh then
+			self.NextListRefresh = os.clock() + 1.5
+			if not spectateDropdown or not spectateDropdown.IsOpen then self:RefreshPlayers() end
+		end
+	end)
+end
+
+function Spectate:Shutdown()
+	if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
+	self:Stop(true)
+end
+
+getgenv().AraiSpectate = Spectate
+
 Farm.ESP = ESP
+Farm.Spectate = Spectate
 getgenv().AraiESP = ESP
 
-local Window = Library:Window({ Name="A-RAI HUB | Candy Farm", Game="Some Town" })
-local Page = Window:CreatePage({ Name="Candy Farm" })
-local Controls = Page:CreateSection({ Name="Automation", Side=1, Collapsed=false })
-local Survival = Page:CreateSection({ Name="Auto Eat / Drink", Side=1, Collapsed=false })
-local Monitor = Page:CreateSection({ Name="Monitor", Side=2, Collapsed=false })
-local ESPPage = Window:CreatePage({ Name="ESP" })
-local ESPControls = ESPPage:CreateSection({ Name="ESP", Side=1, Collapsed=false })
-local ESPInfo = ESPPage:CreateSection({ Name="Player Information", Side=2, Collapsed=false })
+local Window = Library:Window({ Name="A-RAI HUB | Never Town", Game="Never Town" })
+local FarmPage = Window:CreatePage({ Name="◆ FARM" })
+local Controls = FarmPage:CreateSection({ Name="⚡ AUTOMATION", Side=1, Collapsed=false })
+local Monitor = FarmPage:CreateSection({ Name="◈ FARM MONITOR", Side=2, Collapsed=false })
+
+local PlayerPage = Window:CreatePage({ Name="◉ PLAYER" })
+local SpectateControls = PlayerPage:CreateSection({ Name="◉ SPECTATE", Side=1, Collapsed=false })
+local Survival = PlayerPage:CreateSection({ Name="♥ AUTO EAT / DRINK", Side=1, Collapsed=false })
+local SpectateInfo = PlayerPage:CreateSection({ Name="◎ WATCH STATUS", Side=2, Collapsed=false })
+local SurvivalMonitor = PlayerPage:CreateSection({ Name="＋ SURVIVAL STATUS", Side=2, Collapsed=false })
+
+local ESPPage = Window:CreatePage({ Name="◇ ESP" })
+local ESPControls = ESPPage:CreateSection({ Name="◇ ESP CONTROLS", Side=1, Collapsed=false })
+local ESPInfo = ESPPage:CreateSection({ Name="ℹ PLAYER INFORMATION", Side=2, Collapsed=false })
+
+local SettingsPage = Library:CreateSettingsPage(Window)
+SettingsPage.Name = "⚙ SETTINGS"
+if SettingsPage.UI and SettingsPage.UI.Label then SettingsPage.UI.Label.Text = SettingsPage.Name end
+local HubSettings = SettingsPage:CreateSubPage({ Name="A-RAI" })
+local DeviceSettings = HubSettings:CreateSection({ Name="⚙ DEVICE & PERFORMANCE", Side=1, Collapsed=false })
+local AboutSettings = HubSettings:CreateSection({ Name="◆ A-RAI HUB", Side=2, Collapsed=false })
+Spectate.Page = PlayerPage
 
 Controls:Toggle({ Name="Auto Farm Candy", Flag="AraiAutoCandy", Default=false,
 	Tooltip="Farm 5 ingredients, craft SeedCandy x5 and deposit it at REBEL.",
@@ -1747,6 +1947,31 @@ Controls:Slider({ Name="Server Cooldown", Flag="AraiCandyCooldown", Min=20, Max=
 	Callback=function(value) Farm.Settings.Cooldown=math.floor(value) end })
 Controls:Slider({ Name="Teleport Y Offset", Flag="AraiCandyYOffset", Min=0, Max=8, Default=0, Suffix=" studs", Compact=true,
 	Callback=function(value) Farm.Settings.YOffset=value end })
+
+SpectateControls:Slider({ Name="Spectate Range", Flag="AraiSpectateRange", Min=50, Max=1500, Default=500, Suffix=" studs", Compact=true,
+	Callback=function(value)
+		Spectate.Range = math.floor(value)
+		Spectate.NextListRefresh = 0
+		Spectate:RefreshPlayers()
+	end })
+spectateDropdown = SpectateControls:CreateDropdown({
+	Name="Select Player", Items={"No nearby players in range"},
+	Description="Ready players sorted from nearest to farthest.",
+	Callback=function(value)
+		if Spectate.OptionMap[value] then
+			Spectate.SelectedLabel = value
+			Spectate.SelectedTarget = Spectate.OptionMap[value]
+			Spectate:SetStatus("Target ready")
+		else
+			Spectate.SelectedLabel = nil
+			Spectate.SelectedTarget = nil
+		end
+	end,
+})
+local spectateButtons = SpectateControls:CreateButton({})
+spectateButtons:Add("▶ SPECTATE PLAYER", function() Spectate:Watch() end)
+spectateButtons:Add("■ STOP SPECTATE", function() Spectate:Stop() end)
+SpectateControls:CreateButton({ Name="↻ REFRESH PLAYERS", Callback=function() Spectate:RefreshPlayers() end })
 
 Survival:Toggle({ Name="Auto Eat / Drink", Flag="AraiAutoConsume", Default=false,
 	Tooltip="Read the dumped Hunger/Thirsty bars. Food must be in slot 6 and water in slot 7.",
@@ -1781,11 +2006,14 @@ ESPInfo:Label({ Name="Mobile supported", Description="All ESP controls use touch
 espStatusLabel = ESPInfo:Label({ Name="ESP: OFF", Description="Live target and rendered player count" })
 
 statusLabel = Monitor:Label("Status: Idle")
-Monitor:Label({ Name=IS_MOBILE and "Device: Mobile Touch" or "Device: PC Keyboard", Description="Input mode detected automatically" })
-consumeStatusLabel = Monitor:Label({ Name="Consume: Disabled", Description="Auto Eat / Drink state" })
-hungerLabel = Monitor:Label({ Name="Hunger: Unknown | eat below 30%", Description="PlayerGui/Status/Main/Status/Hunger/Bar" })
-thirstLabel = Monitor:Label({ Name="Thirst: Unknown | drink below 30%", Description="PlayerGui/Status/Main/Status/Thirsty/Bar" })
-consumeProgressLabel = Monitor:Label({ Name="Consume progress: Idle", Description="PlayerGui/UIList/Main/Progress" })
+spectateReadyLabel = SpectateInfo:Label({ Name="Players ready: 0 / 0", Description="Detected targets inside Spectate Range" })
+spectateStatusLabel = SpectateInfo:Label({ Name="Status: Idle", Description="Target camera state" })
+SpectateInfo:Label({ Name="External flow", Description="Select a ready target, save local camera, watch Humanoid/root, then restore automatically." })
+
+consumeStatusLabel = SurvivalMonitor:Label({ Name="Consume: Disabled", Description="Auto Eat / Drink state" })
+hungerLabel = SurvivalMonitor:Label({ Name="Hunger: Unknown | eat below 30%", Description="PlayerGui/Status/Main/Status/Hunger/Bar" })
+thirstLabel = SurvivalMonitor:Label({ Name="Thirst: Unknown | drink below 30%", Description="PlayerGui/Status/Main/Status/Thirsty/Bar" })
+consumeProgressLabel = SurvivalMonitor:Label({ Name="Consume progress: Idle", Description="PlayerGui/UIList/Main/Progress" })
 for _, crop in ipairs(CROPS) do
 	local label = Monitor:Label({ Name=crop[1]..": 0 / 100", Description="Candy ingredient" })
 	countLabels[crop[1]] = label
@@ -1795,7 +2023,24 @@ craftedLabel = Monitor:Label({ Name="SeedCandy crafted: 0", Description="Output 
 attachIcon(craftedLabel, CANDY_ICONS.SeedCandy)
 Monitor:Label({ Name="External flow", Description="Cauliflower > Peach > Orange > Corn > Grape; 100 each, 30-second cooldown, craft SeedCandy x5, then deposit at REBEL." })
 
-Library:CreateSettingsPage(Window)
+DeviceSettings:Label({ Name=IS_MOBILE and "◉ Device: Mobile Touch" or "⌨ Device: PC Keyboard", Description="Input mode detected automatically" })
+DeviceSettings:Label({ Name=IS_MOBILE and "ESP motion: 30 FPS" or "ESP motion: 60 FPS", Description="Heavy player/cache reads run in a separate slow loop" })
+DeviceSettings:Label({ Name="Performance tip", Description="Lower ESP Max Players when the server has many players." })
+AboutSettings:Label({ Name="A-RAI HUB", Description="Never Town candy automation, survival, spectate and ESP tools." })
+AboutSettings:Label({ Name="Mobile supported", Description="Touch-ready pages, dropdowns, buttons, toggles and sliders." })
+
+local baseLibraryUnload = Library.Unload
+function Library:Unload(...)
+	Spectate:Shutdown()
+	ESP:Stop()
+	Consume:Stop()
+	Farm:Stop()
+	return baseLibraryUnload(self, ...)
+end
+
+Spectate:StartMonitor()
+Spectate:RefreshPlayers()
+
 Window:SetOpen(true)
 updateStatus()
 refreshConsumeValues()
