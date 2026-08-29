@@ -11,6 +11,28 @@ if type(getgenv) == "function" then
     env = getgenv()
 end
 
+local function disableOldState(key)
+    local oldState = env[key]
+    if type(oldState) ~= "table" then
+        return
+    end
+    oldState.Enabled = false
+    oldState.Sending = false
+    oldState.Running = false
+    oldState.RunningRoundId = nil
+    for _, connection in ipairs(oldState.Connections or {}) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+end
+
+-- A previously executed skip probe leaves its __namecall hook installed for
+-- the lifetime of the client. Disabling its state makes that hook pass through
+-- without sending attempts, so a clean manual minigame can be recorded.
+disableOldState("FishingSkipTest")
+disableOldState("NeverTownFishingSkip")
+
 if env.FishingInboundDump then
     env.FishingInboundDump.Enabled = false
     for _, connection in ipairs(env.FishingInboundDump.Connections or {}) do
