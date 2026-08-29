@@ -763,12 +763,14 @@ local function selectedCraftName(bg)
 	end
 end
 
-local function seedCandyCard(listFrame, bg)
+local function seedCandyCard(listFrame)
 	if not listFrame then return nil end
 	for _, card in ipairs(listFrame:GetChildren()) do
 		local itemName = card:FindFirstChild("ItemName")
 		if itemName and itemName:IsA("TextLabel") and itemName.Text == "SeedCandy" then
-			return card:IsA("GuiButton") and card or clickableFrom(card, bg)
+			-- Confirmed by the live dump: each recipe card is the ImageButton
+			-- PlayerGui/System/Craft/BG/ITlist/Frame/Craft itself.
+			return card:IsA("ImageButton") and visible(card) and card or nil
 		end
 	end
 end
@@ -847,16 +849,15 @@ local function craftSeedCandy(id)
 	end
 	local list = bg:FindFirstChild("ITlist")
 	local listFrame = list and list:FindFirstChild("Frame")
-	local card = seedCandyCard(listFrame, bg)
+	local card = seedCandyCard(listFrame)
 	if not card then closeGui(bg); return false end
 	stage(5, nil, "Selecting SeedCandy")
-	if selectedCraftName(bg) ~= "SeedCandy" then
-		if not clickAndConfirm(card, function()
-			return selectedCraftName(bg) == "SeedCandy"
-		end, id) then
-			closeGui(bg); return false
-		end
+	-- Always send one real pointer/touch click to the exact card. CraftText can
+	-- already say SeedCandy before the card has received its selection event.
+	if not click(card) or not waitActive(0.6, id) then
+		closeGui(bg); return false
 	end
+	if selectedCraftName(bg) ~= "SeedCandy" then closeGui(bg); return false end
 	local amount, quantityContainer = findQuantityLabel(bg)
 	if not amount then closeGui(bg); return false end
 	for _ = 1, 8 do
