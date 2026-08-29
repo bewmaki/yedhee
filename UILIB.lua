@@ -9348,7 +9348,7 @@ function Library:CreateFloatingButton(window)
 		Parent = Menu.FloatingButtonHolder,
 		Size = UDim2New(0, btn_size, 0, btn_size),
 		Position = UDim2New(default_sx, default_x, default_sy, default_y),
-		BackgroundColor3 = BRAND_PURPLE,
+		BackgroundColor3 = FromRGB(4, 4, 7),
 		Text = "",
 		TextColor3 = FromRGB(255, 255, 255),
 		TextSize = IsMobile and 20 or 15,
@@ -9360,7 +9360,7 @@ function Library:CreateFloatingButton(window)
 	corner(btn, IsMobile and 14 or 10)
 	Draw:Create("UIGradient", {
 		Parent = btn,
-		Color = CSNew({ CSK(0, BRAND_PURPLE_LIGHT), CSK(0.52, BRAND_PURPLE), CSK(1, BRAND_PURPLE_DARK) }),
+		Color = CSNew({ CSK(0, FromRGB(24, 22, 30)), CSK(0.55, FromRGB(8, 7, 12)), CSK(1, FromRGB(2, 2, 4)) }),
 		Rotation = 40,
 	})
 	Draw:Create("UIStroke", {
@@ -9368,7 +9368,7 @@ function Library:CreateFloatingButton(window)
 	})
 	local floating_logo = Draw:Create("ImageLabel", {
 		Parent = btn,
-		Size = UDim2New(0.88, 0, 0.52, 0),
+		Size = UDim2New(0.94, 0, 0.62, 0),
 		Position = UDim2New(0.5, 0, 0.5, 0),
 		AnchorPoint = Vector2New(0.5, 0.5),
 		BackgroundTransparency = 1,
