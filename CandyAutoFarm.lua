@@ -10,7 +10,8 @@ local Workspace = game:GetService("Workspace")
 local player = Players.LocalPlayer
 local platformOk, platform = pcall(function() return UserInputService:GetPlatform() end)
 local mobilePlatform = platformOk and (platform == Enum.Platform.Android or platform == Enum.Platform.IOS)
-local IS_MOBILE = getgenv().SolixForceMobile == true
+local IS_MOBILE = getgenv().AraiForceMobile == true
+	or getgenv().SolixForceMobile == true
 	or mobilePlatform
 	or (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
 
@@ -28,7 +29,7 @@ if not Library then
 	Library = result
 end
 
-local old = getgenv().SolixCandyFarm
+local old = getgenv().AraiCandyFarm or getgenv().SolixCandyFarm
 if type(old) == "table" then
 	if type(old.Stop) == "function" then pcall(old.Stop, old) end
 	if type(old.Consume) == "table" and type(old.Consume.Stop) == "function" then
@@ -61,7 +62,8 @@ local Farm = {
 	Counts = {},
 	Settings = { Cooldown = 30, Timeout = 720, YOffset = 0, MoveCamera = true },
 }
-getgenv().SolixCandyFarm = Farm
+getgenv().AraiCandyFarm = Farm
+getgenv().SolixCandyFarm = Farm -- legacy alias for already-running copies
 for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = 0 end
 
 local statusLabel, craftedLabel
@@ -1158,28 +1160,28 @@ function Consume:Stop()
 	updateConsumeUI("Disabled")
 end
 
-local Window = Library:Window({ Name="Solix Hub | Candy Farm", Game="Some Town" })
+local Window = Library:Window({ Name="A-RAI HUB | Candy Farm", Game="Some Town" })
 local Page = Window:CreatePage({ Name="Candy Farm" })
 local Controls = Page:CreateSection({ Name="Automation", Side=1, Collapsed=false })
 local Survival = Page:CreateSection({ Name="Auto Eat / Drink", Side=1, Collapsed=false })
 local Monitor = Page:CreateSection({ Name="Monitor", Side=2, Collapsed=false })
 
-Controls:Toggle({ Name="Auto Farm Candy", Flag="SolixAutoCandy", Default=false,
+Controls:Toggle({ Name="Auto Farm Candy", Flag="AraiAutoCandy", Default=false,
 	Tooltip="Farm 5 ingredients, craft SeedCandy x5 and deposit it at REBEL.",
 	Callback=function(value) if value then Farm:Start() else Farm:Stop() end end })
-Controls:Toggle({ Name="Move Camera To Prompt", Flag="SolixCandyCamera", Default=true,
+Controls:Toggle({ Name="Move Camera To Prompt", Flag="AraiCandyCamera", Default=true,
 	Callback=function(value) Farm.Settings.MoveCamera=value end })
-Controls:Slider({ Name="Server Cooldown", Flag="SolixCandyCooldown", Min=20, Max=60, Default=30, Suffix="s", Compact=true,
+Controls:Slider({ Name="Server Cooldown", Flag="AraiCandyCooldown", Min=20, Max=60, Default=30, Suffix="s", Compact=true,
 	Callback=function(value) Farm.Settings.Cooldown=math.floor(value) end })
-Controls:Slider({ Name="Teleport Y Offset", Flag="SolixCandyYOffset", Min=0, Max=8, Default=0, Suffix=" studs", Compact=true,
+Controls:Slider({ Name="Teleport Y Offset", Flag="AraiCandyYOffset", Min=0, Max=8, Default=0, Suffix=" studs", Compact=true,
 	Callback=function(value) Farm.Settings.YOffset=value end })
 
-Survival:Toggle({ Name="Auto Eat / Drink", Flag="SolixAutoConsume", Default=false,
+Survival:Toggle({ Name="Auto Eat / Drink", Flag="AraiAutoConsume", Default=false,
 	Tooltip="Read the dumped Hunger/Thirsty bars. Food must be in slot 6 and water in slot 7.",
 	Callback=function(value) if value then Consume:Start() else Consume:Stop() end end })
-Survival:Slider({ Name="Eat Below", Flag="SolixHungerThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
+Survival:Slider({ Name="Eat Below", Flag="AraiHungerThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
 	Callback=function(value) Consume.HungerThreshold=math.floor(value); updateConsumeUI() end })
-Survival:Slider({ Name="Drink Below", Flag="SolixThirstThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
+Survival:Slider({ Name="Drink Below", Flag="AraiThirstThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
 	Callback=function(value) Consume.ThirstThreshold=math.floor(value); updateConsumeUI() end })
 Survival:Label({ Name="Food: slot 6", Description=IS_MOBILE and "Mobile: taps hotbar slot 6" or "PC: presses top-row 6" })
 Survival:Label({ Name="Water: slot 7", Description=IS_MOBILE and "Mobile: taps hotbar slot 7" or "PC: presses top-row 7" })

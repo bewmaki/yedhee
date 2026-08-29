@@ -56,7 +56,8 @@ local GuiService = svc("GuiService")
 local LocalPlayer = safe_cloneref(Players.LocalPlayer)
 local platform_ok, current_platform = pcall(function() return UserInputService:GetPlatform() end)
 local mobile_platform = platform_ok and (current_platform == Enum.Platform.Android or current_platform == Enum.Platform.IOS)
-local IsMobile = getgenv().SolixForceMobile == true
+local IsMobile = getgenv().AraiForceMobile == true
+	or getgenv().SolixForceMobile == true
 	or mobile_platform
 	or (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
 local Mouse = safe_cloneref(LocalPlayer and LocalPlayer:GetMouse())
@@ -100,9 +101,12 @@ local spawn = task.spawn
 -- executor's workspace, and BRAND_WORD_1/BRAND_WORD_2 are the two words shown
 -- in the small watermark at the bottom-left of every window.
 -- ============================================================================
-local BRAND_DIR = "myhub"
-local BRAND_WORD_1 = "my"
+local BRAND_DIR = "a-rai-hub"
+local BRAND_WORD_1 = "a-rai "
 local BRAND_WORD_2 = "hub"
+local BRAND_PURPLE_DARK = FromRGB(92, 38, 190)
+local BRAND_PURPLE = FromRGB(145, 72, 255)
+local BRAND_PURPLE_LIGHT = FromRGB(203, 151, 255)
 
 local GameId = tostring(game.GameId)
 local Folders = {
@@ -161,9 +165,9 @@ local Themes = {
 		Shadow = FromRGB(8, 6, 12),
 		Text = FromRGB(242, 240, 248),
 		["Inactive Text"] = FromRGB(148, 144, 162),
-		Accent = FromRGB(215, 40, 114),
+		Accent = BRAND_PURPLE,
 		Element = FromRGB(32, 30, 40),
-		Gradient = FromRGB(255, 140, 185),
+		Gradient = BRAND_PURPLE_LIGHT,
 	},
 	Fatality = {
 		Background = FromRGB(16, 16, 18), Inline = FromRGB(24, 24, 28), Border = FromRGB(46, 46, 52),
@@ -2348,11 +2352,10 @@ function Library:EnsureFolders()
 	end
 end
 
--- Restored to the original Solix Hub logo for this branded copy.
--- Set Library.LogoUrl to "" (and Library.LogoFallback to your own
--- rbxassetid://) if you want to go back to no third-party fetch at all.
-Library.LogoUrl = "https://solixhub.com/solix-logo.png"
-Library.LogoFallback = "rbxassetid://137698471325689"
+-- A-RAI HUB uses a code-drawn RAI mark, so opening the UI never depends on
+-- an external logo download. These remain available for custom integrations.
+Library.LogoUrl = ""
+Library.LogoFallback = ""
 
 function Library:GetLogoAsset()
 	if type(self._logo_asset) == "string" and self._logo_asset ~= "" then
@@ -2744,20 +2747,33 @@ do
 			Theme = { ImageColor3 = "Shadow" },
 		})
 
-		UI.Logo = Draw:Create("ImageLabel", {
+		UI.Logo = Draw:Create("Frame", {
 			Parent = UI.MainFrame,
-			Size = UDim2New(0, 18, 0, 18),
-			Position = UDim2New(0, 9, 0, 7),
-			BackgroundTransparency = 1,
-			Image = "",
-			ScaleType = Enum.ScaleType.Fit,
+			Size = UDim2New(0, 30, 0, 20),
+			Position = UDim2New(0, 7, 0, 5),
+			BackgroundColor3 = BRAND_PURPLE,
+			BorderSizePixel = 0,
 			ZIndex = 4,
+		})
+		corner(UI.Logo, 6)
+		Draw:Create("UIGradient", {
+			Parent = UI.Logo,
+			Color = CSNew({ CSK(0, BRAND_PURPLE_LIGHT), CSK(1, BRAND_PURPLE_DARK) }),
+			Rotation = 35,
+		})
+		Draw:Create("UIStroke", {
+			Parent = UI.Logo, Color = BRAND_PURPLE_LIGHT, Thickness = 1, Transparency = 0.18,
+		})
+		Draw:Create("TextLabel", {
+			Parent = UI.Logo, Size = UDim2New(1, 0, 1, 0), BackgroundTransparency = 1,
+			Text = "RAI", TextColor3 = FromRGB(255, 255, 255), TextSize = 11,
+			FontFace = Menu.Font, ZIndex = 5,
 		})
 
 		UI.Title = Draw:Create("TextLabel", {
 			Parent = UI.MainFrame,
 			Size = UDim2New(0, 0, 0, 15),
-			Position = UDim2New(0, 32, 0, 8),
+			Position = UDim2New(0, 43, 0, 8),
 			BackgroundTransparency = 1,
 			Text = self.Name,
 			TextColor3 = Menu.Theme.Text,
@@ -2767,7 +2783,6 @@ do
 			ZIndex = 4,
 			Theme = { TextColor3 = "Text" },
 		})
-		Library:ApplyLogoImage(UI.Logo)
 
 		UI.Pages = Draw:Create("ScrollingFrame", {
 			Parent = UI.MainFrame,
@@ -9340,21 +9355,28 @@ function Library:CreateFloatingButton(window)
 	local default_sx = 0
 	local default_sy = IsMobile and 0.5 or 0
 
-	local btn = Draw:Create("ImageButton", {
+	local btn = Draw:Create("TextButton", {
 		Parent = Menu.FloatingButtonHolder,
 		Size = UDim2New(0, btn_size, 0, btn_size),
 		Position = UDim2New(default_sx, default_x, default_sy, default_y),
-		BackgroundColor3 = Menu.Theme.Background,
-		Image = Library.LogoFallback or "rbxassetid://137698471325689",
-		ImageColor3 = Menu.Theme.Accent,
-		ScaleType = Enum.ScaleType.Fit,
+		BackgroundColor3 = BRAND_PURPLE,
+		Text = "RAI",
+		TextColor3 = FromRGB(255, 255, 255),
+		TextSize = IsMobile and 20 or 15,
+		FontFace = Menu.Font,
 		AutoButtonColor = false,
 		Active = true,
 		ZIndex = 128,
-		Theme = { BackgroundColor3 = "Background" },
 	})
 	corner(btn, IsMobile and 14 or 10)
-	Library:ApplyLogoImage(btn)
+	Draw:Create("UIGradient", {
+		Parent = btn,
+		Color = CSNew({ CSK(0, BRAND_PURPLE_LIGHT), CSK(0.52, BRAND_PURPLE), CSK(1, BRAND_PURPLE_DARK) }),
+		Rotation = 40,
+	})
+	Draw:Create("UIStroke", {
+		Parent = btn, Color = BRAND_PURPLE_LIGHT, Thickness = IsMobile and 2 or 1.5, Transparency = 0.12,
+	})
 
 	local pos = Menu.Flags.FloatingButtonPosition or self.FloatingButtonPosition
 	if type(pos) == "table" and pos.X and pos.Y then
