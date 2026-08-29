@@ -211,8 +211,9 @@ local function exact(root, name)
 end
 
 local function parseCount(text)
-	text = tostring(text or ""):gsub(",", "")
-	local a, b = text:match("(%d+)%s*/%s*(%d+)")
+	text = tostring(text or ""):gsub("<[^>]->", ""):gsub(",", "")
+	-- Current Inventory renders stacks as 100|100; older UI uses 100/100.
+	local a, b = text:match("(%d+)%s*[/|]%s*(%d+)")
 	if a then return tonumber(a), tonumber(b) end
 	local n = text:match("^%s*(%d+)%s*$")
 	return n and tonumber(n) or nil, nil
@@ -229,15 +230,22 @@ end
 
 local function itemCount(root, itemName)
 	local item = exact(root, itemName)
-	if not item then return 0, false end
+	if not item then return 0, false, false end
 	local branch = item
 	for _ = 1, 4 do
+		if branch == root then break end
+		-- Bind the count to this exact item card. Never fall through to another
+		-- card's plain number (for example BonusCoins=31).
+		local amount = branch:FindFirstChild("Amount", true)
+		if amount and (amount:IsA("TextLabel") or amount:IsA("TextButton") or amount:IsA("TextBox")) then
+			local current = parseCount(amount.Text)
+			if current ~= nil then return current, true end
+		end
 		local count = branchCount(branch)
 		if count ~= nil then return count, true end
-		if branch == root then break end
 		branch = branch.Parent
 	end
-	return 1, true
+	return 0, false, true
 end
 
 local function inventoryPanel()
@@ -284,13 +292,14 @@ end
 
 local function modernItemCount(panel, itemName)
 	local card = panel:FindFirstChild(itemName)
+	if not card then return 0, false, false end
 	local main = card and card:FindFirstChild("Main")
 	local amount = main and main:FindFirstChild("Amount")
 	if not amount or not (amount:IsA("TextLabel") or amount:IsA("TextButton")) then
-		return 0, false
+		return 0, false, true
 	end
 	local current = parseCount(amount.Text)
-	return current or 0, current ~= nil
+	return current or 0, current ~= nil, current == nil
 end
 
 local function selectModernInventoryAll()
@@ -327,11 +336,16 @@ local function scanInventory(id)
 	local observed = {}
 	for scan = 1, 3 do
 		for _, crop in ipairs(CROPS) do
-			local count, found
+			local count, found, invalid
 			if mode == "modern" then
-				count, found = modernItemCount(panel, crop[1])
+				count, found, invalid = modernItemCount(panel, crop[1])
 			else
-				count, found = itemCount(panel, crop[1])
+				count, found, invalid = itemCount(panel, crop[1])
+			end
+			if invalid then
+				updateStatus("Invalid Amount: " .. crop[1])
+				if opened and inventoryPanel() then key(Enum.KeyCode.T) end
+				return false
 			end
 			if found then observed[crop[1]] = math.max(observed[crop[1]] or 0, count) end
 		end
