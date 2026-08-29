@@ -4,7 +4,6 @@
 local Players = game:GetService("Players")
 local VIM = game:GetService("VirtualInputManager")
 local VirtualUser = game:GetService("VirtualUser")
-local GuiService = game:GetService("GuiService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
@@ -285,7 +284,7 @@ end
 
 local function click(gui)
 	if not gui or not gui:IsA("GuiObject") then return false end
-	if IS_MOBILE then return activateGuiDirect(gui) end
+	if IS_MOBILE then return touchGui(gui) end
 	-- Use a real pointer click for game-owned UI. Some executors return success
 	-- from firesignal without Roblox's crafting controller receiving the action.
 	local point = gui.AbsolutePosition + gui.AbsoluteSize / 2
@@ -306,60 +305,19 @@ local function clickAndConfirm(gui, confirm, id, confirmWait)
 	local methods = {
 		function() click(gui) end,
 		function()
-			if IS_MOBILE then return end
-			-- Selectable=true in the focused dump, so keyboard activation can
-			-- reach the controller even when pointer injection is blocked.
-			GuiService.SelectedObject = gui
-			key(Enum.KeyCode.Return, 0.08)
-		end,
-		function()
 			if IS_MOBILE then
 				touchGui(gui)
 			else
 				VirtualUser:ClickButton1(point, camera and camera.CFrame or CFrame.new())
 			end
 		end,
+		function() click(gui) end,
 	}
 
 	for _, method in ipairs(methods) do
 		pcall(method)
-		if waitFor(confirm, confirmWait, id) then
-			pcall(function() GuiService.SelectedObject = nil end)
-			return true
-		end
+		if waitFor(confirm, confirmWait, id) then return true end
 	end
-
-	-- Only fire/invoke button handlers after every real-input method was
-	-- confirmed to make no change. This prevents a late click from changing the
-	-- quantity twice.
-	if gui:IsA("GuiButton") then
-		local signalNames = { "Activated", "MouseButton1Click" }
-		if type(firesignal) == "function" then
-			for _, signalName in ipairs(signalNames) do
-				pcall(function() firesignal(gui[signalName]) end)
-				if waitFor(confirm, confirmWait, id) then return true end
-			end
-		end
-
-		if type(getconnections) == "function" then
-			for _, signalName in ipairs(signalNames) do
-				local ok, connections = pcall(getconnections, gui[signalName])
-				if ok and type(connections) == "table" then
-					for _, connection in ipairs(connections) do
-						pcall(function()
-							if type(connection.Fire) == "function" then
-								connection:Fire()
-							elseif type(connection.Function) == "function" then
-								connection.Function()
-							end
-						end)
-					end
-					if waitFor(confirm, confirmWait, id) then return true end
-				end
-			end
-		end
-	end
-	pcall(function() GuiService.SelectedObject = nil end)
 	return false
 end
 
@@ -2488,8 +2446,6 @@ attachIcon(craftedLabel, CANDY_ICONS.SeedCandy)
 
 local antiAFKToggle = DeviceSettings:Toggle({ Name="Anti AFK", Flag="AraiAntiAFKEnabled", Default=true,
 	Callback=function(value) if value then AntiAFK:Start() else AntiAFK:Stop() end end })
-DeviceSettings:Label({ Name=IS_MOBILE and "Device: Mobile Touch" or "Device: PC Keyboard" })
-DeviceSettings:Label({ Name=IS_MOBILE and "ESP Update Rate: 30 FPS" or "ESP Update Rate: 60 FPS" })
 
 local baseLibraryUnload = Library.Unload
 function Library:Unload(...)
