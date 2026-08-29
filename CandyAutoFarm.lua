@@ -15,18 +15,22 @@ local IS_MOBILE = getgenv().AraiForceMobile == true
 	or mobilePlatform
 	or (UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled)
 
-local Library = getgenv().Library
-if not Library then
-	local ok, result = pcall(function()
-		if type(isfile) == "function" and isfile("UILIB.lua") then
-			return loadstring(readfile("UILIB.lua"))()
-		end
-		return loadstring(game:HttpGet("https://raw.githubusercontent.com/bewmaki/yedhee/main/UILIB.lua"))()
-	end)
-	if not ok or not result then
-		error("CandyAutoFarm: UILIB load failed: " .. tostring(result))
+local previousLibrary = getgenv().Library
+if type(previousLibrary) == "table" and type(previousLibrary.Unload) == "function" then
+	pcall(previousLibrary.Unload, previousLibrary)
+end
+getgenv().Library = nil
+
+local ok, Library = pcall(function()
+	if getgenv().AraiUseLocalUILib == true and type(isfile) == "function" and isfile("UILIB.lua") then
+		return loadstring(readfile("UILIB.lua"))()
 	end
-	Library = result
+	local cacheBust = tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
+	local url = "https://raw.githubusercontent.com/bewmaki/yedhee/main/UILIB.lua?cb=" .. cacheBust
+	return loadstring(game:HttpGet(url, true))()
+end)
+if not ok or not Library then
+	error("CandyAutoFarm: UILIB load failed: " .. tostring(Library))
 end
 
 local old = getgenv().AraiCandyFarm or getgenv().SolixCandyFarm
