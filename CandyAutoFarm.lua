@@ -1183,6 +1183,7 @@ local ESP = {
 	UpdateInterval = IS_MOBILE and 0.16 or 0.1,
 	ProxyCharacters = {},
 	NextProxyScan = 0,
+	RootGui = nil,
 }
 
 local ARMOR_NAMES = { "AmmorHeal", "Armor", "Armour", "ArmorValue", "ArmourValue", "Shield", "Vest", "Protection" }
@@ -1291,18 +1292,34 @@ function ESP:DestroyPlayer(target)
 	self.Objects[target] = nil
 end
 
+function ESP:EnsureRootGui()
+	if self.RootGui and self.RootGui.Parent then return self.RootGui end
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "AraiScreenESP"
+	gui.IgnoreGuiInset = true
+	gui.ResetOnSpawn = false
+	gui.DisplayOrder = 50
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+	local parent = player:WaitForChild("PlayerGui")
+	if type(gethui) == "function" then
+		local ok, hidden = pcall(gethui)
+		if ok and hidden then parent = hidden end
+	end
+	gui.Parent = parent
+	self.RootGui = gui
+	return gui
+end
+
 function ESP:CreatePlayer(target, adornee)
 	self:DestroyPlayer(target)
-	local gui = Instance.new("BillboardGui")
+	local gui = Instance.new("Frame")
 	gui.Name = "AraiPlayerESP"
-	gui.Adornee = adornee
-	gui.AlwaysOnTop = true
-	gui.LightInfluence = 0
-	gui.MaxDistance = self.MaxDistance
 	gui.Size = UDim2.fromOffset(170, 62)
-	gui.StudsOffsetWorldSpace = Vector3.new(0, 3.25, 0)
-	gui.Enabled = false
-	gui.Parent = adornee
+	gui.AnchorPoint = Vector2.new(0.5, 1)
+	gui.BackgroundTransparency = 1
+	gui.Visible = false
+	gui.ZIndex = 20
+	gui.Parent = self:EnsureRootGui()
 
 	local name = Instance.new("TextLabel")
 	name.BackgroundTransparency = 1
@@ -1368,15 +1385,18 @@ function ESP:RefreshPlayer(target, localRoot)
 	local object = self.Objects[target]
 	if not object or not object.Gui or not object.Gui.Parent then
 		object = self:CreatePlayer(target, adornee)
-	elseif object.Gui.Adornee ~= adornee then
-		object.Gui.Adornee = adornee
 	end
 
 	local distance = localRoot and (root.Position - localRoot.Position).Magnitude or math.huge
-	local onRange = self.Enabled and distance <= self.MaxDistance
-	object.Gui.Enabled = onRange
-	object.Gui.MaxDistance = self.MaxDistance
+	local camera = Workspace.CurrentCamera
+	local screenPoint = camera and camera:WorldToViewportPoint(adornee.Position + Vector3.new(0, 1.1, 0))
+	local onRange = self.Enabled and camera ~= nil and screenPoint.Z > 0 and distance <= self.MaxDistance
+	object.Gui.Visible = onRange
 	if not onRange then return end
+	local viewport = camera.ViewportSize
+	local screenX = math.clamp(screenPoint.X, 85, math.max(85, viewport.X - 85))
+	local screenY = math.clamp(screenPoint.Y, 62, math.max(62, viewport.Y - 6))
+	object.Gui.Position = UDim2.fromOffset(screenX, screenY)
 
 	object.Name.Visible = self.ShowName
 	object.Name.Text = target.DisplayName ~= target.Name and (target.DisplayName .. "  @" .. target.Name) or target.Name
@@ -1389,24 +1409,26 @@ function ESP:RefreshPlayer(target, localRoot)
 	object.HealthBack.Visible = self.ShowHealth
 	object.HealthFill.Size = UDim2.fromScale(healthRatio, 1)
 	object.HealthFill.BackgroundColor3 = Color3.fromRGB(math.floor(255 * (1 - healthRatio)), math.floor(220 * healthRatio + 35), 75)
-	object.HealthText.Text = string.format("HP %d / %d", math.floor(health + 0.5), math.floor(maxHealth + 0.5))
+	object.HealthText.Text = string.format("HP %d%%", math.floor(healthRatio * 100 + 0.5))
 
 	local armor, maxArmor = self:GetArmor(target, character, humanoid)
 	object.ArmorBack.Visible = self.ShowArmor
 	object.ArmorFill.Size = UDim2.fromScale(armor / maxArmor, 1)
-	object.ArmorText.Text = string.format("ARMOR %d / %d", math.floor(armor + 0.5), math.floor(maxArmor + 0.5))
+	object.ArmorText.Text = string.format("ARMOR %d%%", math.floor((armor / maxArmor) * 100 + 0.5))
 end
 
 function ESP:RefreshAll()
 	local localCharacter = resolvePlayerCharacter(player)
-	local localRoot = localCharacter and localCharacter:FindFirstChild("HumanoidRootPart")
+	local localRoot = findCharacterRoot(localCharacter)
+	local camera = Workspace.CurrentCamera
+	local localReference = localRoot or (camera and { Position = camera.CFrame.Position })
 	local present = {}
 	local total = 0
 	for _, target in ipairs(Players:GetPlayers()) do
 		if target ~= player then
 			total += 1
 			present[target] = true
-			self:RefreshPlayer(target, localRoot)
+			self:RefreshPlayer(target, localReference)
 		end
 	end
 	for target in pairs(self.Objects) do
@@ -1414,7 +1436,7 @@ function ESP:RefreshAll()
 	end
 	local rendered = 0
 	for _, object in pairs(self.Objects) do
-		if object.Gui and object.Gui.Enabled then rendered += 1 end
+		if object.Gui and object.Gui.Visible then rendered += 1 end
 	end
 	if espStatusLabel then
 		espStatusLabel:SetText(string.format("ESP: %s | players: %d | rendered: %d", self.Enabled and "ON" or "OFF", total, rendered))
@@ -1442,6 +1464,7 @@ function ESP:Stop()
 	local targets = {}
 	for target in pairs(self.Objects) do targets[#targets + 1] = target end
 	for _, target in ipairs(targets) do self:DestroyPlayer(target) end
+	if self.RootGui then pcall(self.RootGui.Destroy, self.RootGui); self.RootGui = nil end
 	if espStatusLabel then espStatusLabel:SetText("ESP: OFF") end
 end
 
