@@ -2089,8 +2089,6 @@ local SpectateControls = PlayerPage:CreateSection({ Name="SPECTATE", Side=1, Col
 local GPSControls = PlayerPage:CreateSection({ Name="GPS TELEPORT", Side=1, Collapsed=false })
 local Survival = PlayerPage:CreateSection({ Name="AUTO EAT / DRINK", Side=1, Collapsed=false })
 local SpectateInfo = PlayerPage:CreateSection({ Name="SPECTATE STATUS", Side=2, Collapsed=false })
-local GPSInfo = PlayerPage:CreateSection({ Name="GPS STATUS", Side=2, Collapsed=false })
-local SurvivalMonitor = PlayerPage:CreateSection({ Name="SURVIVAL STATUS", Side=2, Collapsed=false })
 
 local ESPPage = Window:CreatePage({ Name="ESP" })
 local ESPControls = ESPPage:CreateSection({ Name="ESP CONTROLS", Side=1, Collapsed=false })
@@ -2171,14 +2169,6 @@ espStatusLabel = ESPControls:Label({ Name="ESP: OFF" })
 statusLabel = Monitor:Label("Status: Idle")
 spectateReadyLabel = SpectateInfo:Label({ Name="Players ready: 0 / 0" })
 spectateStatusLabel = SpectateInfo:Label({ Name="Status: Idle" })
-
-gpsStatusLabel = GPSInfo:Label({ Name="GPS: Place a marker on the map" })
-gpsCoordinateLabel = GPSInfo:Label({ Name="Target: Not detected" })
-
-consumeStatusLabel = SurvivalMonitor:Label({ Name="Consume: Disabled" })
-hungerLabel = SurvivalMonitor:Label({ Name="Hunger: Unknown | eat below 30%" })
-thirstLabel = SurvivalMonitor:Label({ Name="Thirst: Unknown | drink below 30%" })
-consumeProgressLabel = SurvivalMonitor:Label({ Name="Consume progress: Idle" })
 for _, crop in ipairs(CROPS) do
 	local label = Monitor:Label({ Name=crop[1]..": 0 / 100" })
 	countLabels[crop[1]] = label
