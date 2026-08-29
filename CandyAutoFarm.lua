@@ -1180,7 +1180,7 @@ local ESP = {
 	Objects = {},
 	Connection = nil,
 	Accumulator = 0,
-	UpdateInterval = IS_MOBILE and (1 / 15) or (1 / 24),
+	UpdateInterval = IS_MOBILE and 0.15 or 0.1,
 	ProxyCharacters = {},
 	NextProxyScan = {},
 	RootGui = nil,
@@ -1233,7 +1233,9 @@ function ESP:ResolveWorkspaceProxy(target, force)
 
 	local now = os.clock()
 	if not force and now < (self.NextProxyScan[target] or 0) then return nil end
-	self.NextProxyScan[target] = now + 8
+	-- A direct child lookup is cheap; retry quickly because Never Town replaces
+	-- the proxy instance when streaming range changes.
+	self.NextProxyScan[target] = now + 0.5
 
 	-- Never Town's dump exposes live player proxies as direct Workspace children:
 	-- Workspace.<player name>. Avoid every recursive lookup in the render loop.
@@ -1248,9 +1250,14 @@ end
 
 local function resolvePlayerCharacter(target)
 	if not target then return nil end
+	-- Match Never Town external cache order: the live Workspace proxy wins over
+	-- Player.Character. At close range Player.Character may become a usable but
+	-- non-rendered streaming replica, which made the ESP switch away and vanish.
+	local proxy = ESP:ResolveWorkspaceProxy(target, false)
+	if proxy then return proxy end
 	local character = target.Character
 	if character and character.Parent and usableCharacter(character) then return character end
-	return ESP:ResolveWorkspaceProxy(target, false)
+	return nil
 end
 
 local function addCorner(instance, radius)
@@ -1433,7 +1440,8 @@ function ESP:RefreshPlayer(target, localRoot)
 	object.Name.Visible = self.ShowName
 	object.Name.Text = target.DisplayName ~= target.Name and (target.DisplayName .. "  @" .. target.Name) or target.Name
 	object.Distance.Visible = self.ShowDistance
-	object.Distance.Text = tostring(math.floor(distance + 0.5)) .. "m"
+	local displayedDistance = distance < math.huge and distance or cameraDistance
+	object.Distance.Text = tostring(math.floor(displayedDistance + 0.5)) .. "m"
 
 	local maxHealth = math.max(1, humanoid.MaxHealth)
 	local health = math.clamp(humanoid.Health, 0, maxHealth)
