@@ -92,6 +92,11 @@ if type(previousGPS) == "table" and type(previousGPS.Stop) == "function" then
 	pcall(previousGPS.Stop, previousGPS)
 end
 getgenv().AraiGPS = nil
+local previousInvisible = getgenv().AraiInvisible
+if type(previousInvisible) == "table" and type(previousInvisible.Stop) == "function" then
+	pcall(previousInvisible.Stop, previousInvisible, true)
+end
+getgenv().AraiInvisible = nil
 
 local CROPS = {
 	{ "Cauliflower", Vector3.new(-4167.1, 74.5, 1250.2), Vector3.new(-4145.3, 84.5, 1253.4), Vector3.new(-0.922, -0.363, -0.136) },
@@ -125,6 +130,7 @@ for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = 0 end
 local statusLabel, craftedLabel, espStatusLabel, spectateStatusLabel, spectateReadyLabel
 local gpsStatusLabel, gpsCoordinateLabel
 local spectateDropdown
+local invisibleToggle
 local countLabels = {}
 local consumeBusy = false
 
@@ -2103,12 +2109,185 @@ function GPS:Stop()
 	self.Target = nil
 end
 
+local Invisible = {
+	Enabled = false,
+	Depth = 30,
+	RealCharacter = nil,
+	FakeCharacter = nil,
+	FollowConnection = nil,
+	DeathConnections = {},
+	CollisionState = {},
+	OriginalArchivable = nil,
+}
+
+function Invisible:DisconnectRuntime()
+	if self.FollowConnection then
+		self.FollowConnection:Disconnect()
+		self.FollowConnection = nil
+	end
+	for _, connection in ipairs(self.DeathConnections) do
+		pcall(connection.Disconnect, connection)
+	end
+	table.clear(self.DeathConnections)
+end
+
+function Invisible:SetRealCollision(enabled)
+	local realCharacter = self.RealCharacter
+	if not realCharacter then return end
+	if not enabled then
+		table.clear(self.CollisionState)
+		for _, object in ipairs(realCharacter:GetDescendants()) do
+			if object:IsA("BasePart") then
+				self.CollisionState[object] = {
+					CanCollide = object.CanCollide,
+					CanTouch = object.CanTouch,
+					CanQuery = object.CanQuery,
+				}
+				object.CanCollide = false
+				object.CanTouch = false
+				object.CanQuery = false
+			end
+		end
+		return
+	end
+	for object, state in pairs(self.CollisionState) do
+		if object and object.Parent then
+			pcall(function()
+				object.CanCollide = state.CanCollide
+				object.CanTouch = state.CanTouch
+				object.CanQuery = state.CanQuery
+			end)
+		end
+	end
+	table.clear(self.CollisionState)
+end
+
+function Invisible:Start()
+	if self.Enabled then return true end
+	local realCharacter = player.Character
+	local realRoot = realCharacter and realCharacter:FindFirstChild("HumanoidRootPart")
+	local realHumanoid = realCharacter and realCharacter:FindFirstChildOfClass("Humanoid")
+	if not realCharacter or not realRoot or not realHumanoid or realHumanoid.Health <= 0 then
+		return false
+	end
+
+	Spectate:Stop(true)
+	if Farm.Enabled then Farm:Stop() end
+
+	self.RealCharacter = realCharacter
+	self.OriginalArchivable = realCharacter.Archivable
+	realCharacter.Archivable = true
+	local ok, fakeCharacter = pcall(function() return realCharacter:Clone() end)
+	if not ok or not fakeCharacter then
+		realCharacter.Archivable = self.OriginalArchivable == true
+		self.RealCharacter = nil
+		self.OriginalArchivable = nil
+		return false
+	end
+
+	fakeCharacter.Name = "AraiInvisibleCharacter"
+	fakeCharacter:SetAttribute("AraiInvisibleClone", true)
+	fakeCharacter.Parent = Workspace
+	fakeCharacter:PivotTo(realCharacter:GetPivot())
+	local fakeRoot = fakeCharacter:FindFirstChild("HumanoidRootPart")
+	local fakeHumanoid = fakeCharacter:FindFirstChildOfClass("Humanoid")
+	if not fakeRoot or not fakeHumanoid then
+		fakeCharacter:Destroy()
+		realCharacter.Archivable = self.OriginalArchivable == true
+		self.RealCharacter = nil
+		self.OriginalArchivable = nil
+		return false
+	end
+
+	self.FakeCharacter = fakeCharacter
+	self:SetRealCollision(false)
+	realRoot.CFrame = fakeRoot.CFrame * CFrame.new(0, -self.Depth, 0)
+	realRoot.AssemblyLinearVelocity = Vector3.zero
+	realRoot.AssemblyAngularVelocity = Vector3.zero
+	player.Character = fakeCharacter
+	local camera = Workspace.CurrentCamera
+	if camera then
+		camera.CameraSubject = fakeHumanoid
+		camera.CameraType = Enum.CameraType.Custom
+	end
+	self.Enabled = true
+
+	self.FollowConnection = RunService.Heartbeat:Connect(function()
+		if not self.Enabled then return end
+		local currentRealRoot = self.RealCharacter and self.RealCharacter:FindFirstChild("HumanoidRootPart")
+		local currentFakeRoot = self.FakeCharacter and self.FakeCharacter:FindFirstChild("HumanoidRootPart")
+		if not currentRealRoot or not currentFakeRoot then
+			task.defer(function() self:Stop() end)
+			return
+		end
+		currentRealRoot.CFrame = currentFakeRoot.CFrame * CFrame.new(0, -self.Depth, 0)
+		currentRealRoot.AssemblyLinearVelocity = Vector3.zero
+		currentRealRoot.AssemblyAngularVelocity = Vector3.zero
+	end)
+
+	self.DeathConnections[#self.DeathConnections + 1] = fakeHumanoid.Died:Connect(function()
+		task.defer(function() self:Stop() end)
+	end)
+	self.DeathConnections[#self.DeathConnections + 1] = realHumanoid.Died:Connect(function()
+		task.defer(function() self:Stop() end)
+	end)
+	return true
+end
+
+function Invisible:Stop(quiet)
+	local wasEnabled = self.Enabled
+	self.Enabled = false
+	self:DisconnectRuntime()
+
+	local realCharacter = self.RealCharacter
+	local fakeCharacter = self.FakeCharacter
+	local returnCFrame
+	if fakeCharacter and fakeCharacter.Parent then
+		local fakeRoot = fakeCharacter:FindFirstChild("HumanoidRootPart")
+		if fakeRoot then returnCFrame = fakeRoot.CFrame end
+	end
+
+	self:SetRealCollision(true)
+	if realCharacter and realCharacter.Parent then
+		if returnCFrame then
+			pcall(function()
+				realCharacter:PivotTo(returnCFrame)
+				local realRoot = realCharacter:FindFirstChild("HumanoidRootPart")
+				if realRoot then
+					realRoot.AssemblyLinearVelocity = Vector3.zero
+					realRoot.AssemblyAngularVelocity = Vector3.zero
+				end
+			end)
+		end
+		pcall(function() realCharacter.Archivable = self.OriginalArchivable == true end)
+		pcall(function() player.Character = realCharacter end)
+		local realHumanoid = realCharacter:FindFirstChildOfClass("Humanoid")
+		local camera = Workspace.CurrentCamera
+		if camera and realHumanoid then
+			pcall(function()
+				camera.CameraSubject = realHumanoid
+				camera.CameraType = Enum.CameraType.Custom
+			end)
+		end
+	end
+	if fakeCharacter then pcall(fakeCharacter.Destroy, fakeCharacter) end
+
+	self.RealCharacter = nil
+	self.FakeCharacter = nil
+	self.OriginalArchivable = nil
+	if wasEnabled and not quiet and invisibleToggle and invisibleToggle.Value then
+		invisibleToggle:SetValue(false, true)
+	end
+end
+
 getgenv().AraiSpectate = Spectate
 getgenv().AraiGPS = GPS
+getgenv().AraiInvisible = Invisible
 
 Farm.ESP = ESP
 Farm.Spectate = Spectate
 Farm.GPS = GPS
+Farm.Invisible = Invisible
 getgenv().AraiESP = ESP
 
 local Window = Library:Window({ Name="A-RAI HUB | Never Town", Game="Never Town" })
@@ -2121,6 +2300,7 @@ local SpectateControls = PlayerPage:CreateSection({ Name="SPECTATE", Side=1, Col
 local GPSControls = PlayerPage:CreateSection({ Name="GPS TELEPORT", Side=1, Collapsed=false })
 local Survival = PlayerPage:CreateSection({ Name="AUTO EAT / DRINK", Side=1, Collapsed=false })
 local SpectateInfo = PlayerPage:CreateSection({ Name="SPECTATE STATUS", Side=2, Collapsed=false })
+local InvisibleControls = PlayerPage:CreateSection({ Name="INVISIBLE", Side=2, Collapsed=false })
 
 local ESPPage = Window:CreatePage({ Name="ESP" })
 local ESPControls = ESPPage:CreateSection({ Name="ESP CONTROLS", Side=1, Collapsed=false })
@@ -2171,6 +2351,19 @@ GPSControls:Slider({ Name="Landing Y Offset", Flag="AraiGPSYOffset", Min=-5, Max
 	Callback=function(value) GPS.YOffset=value; GPS:ResolveTarget(true) end })
 GPSControls:CreateButton({ Name="TELEPORT TO GPS", Callback=function() GPS:Teleport() end })
 
+invisibleToggle = InvisibleControls:Toggle({ Name="Underground Invisible", Flag="AraiUndergroundInvisible", Default=false,
+	Callback=function(value)
+		if value then
+			if not Invisible:Start() then
+				task.defer(function()
+					if invisibleToggle then invisibleToggle:SetValue(false, true) end
+				end)
+			end
+		else
+			Invisible:Stop(true)
+		end
+	end })
+
 Survival:Toggle({ Name="Auto Eat / Drink", Flag="AraiAutoConsume", Default=false,
 	Callback=function(value) if value then Consume:Start() else Consume:Stop() end end })
 Survival:Slider({ Name="Eat Below", Flag="AraiHungerThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
@@ -2214,6 +2407,7 @@ DeviceSettings:Label({ Name=IS_MOBILE and "ESP Update Rate: 30 FPS" or "ESP Upda
 
 local baseLibraryUnload = Library.Unload
 function Library:Unload(...)
+	Invisible:Stop(true)
 	Spectate:Shutdown()
 	GPS:Stop()
 	ESP:Stop()
