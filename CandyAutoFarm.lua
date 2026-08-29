@@ -2077,18 +2077,21 @@ function GPS:FindMapObjects()
 	local mapMarker = viewport:FindFirstChild("MapMarker", true)
 	local mapCamera = viewport:FindFirstChild("Camera", true) or viewport.CurrentCamera
 	local mapBase = viewport:FindFirstChild("MapBase", true)
+		or mapFrame:FindFirstChild("MapBase", true)
+		or (miniMap and miniMap:FindFirstChild("MapBase", true))
 	if not userMarker or not userMarker:IsA("GuiObject") then return nil, "UserMarker was not found" end
 	if not mapMarker or not mapMarker:IsA("GuiObject") then return nil, "Place a GPS marker on the map" end
 	if not mapMarker.Visible then return nil, "Place a GPS marker on the map" end
 	if not mapCamera or not mapCamera:IsA("Camera") then return nil, "Map camera was not found" end
-	if not mapBase or not mapBase:IsA("BasePart") then return nil, "MapBase was not found" end
+	local mapPlaneY = 0
+	if mapBase and mapBase:IsA("BasePart") then mapPlaneY = mapBase.Position.Y end
 
 	return {
 		Viewport = viewport,
 		UserMarker = userMarker,
 		MapMarker = mapMarker,
 		Camera = mapCamera,
-		MapBase = mapBase,
+		MapPlaneY = mapPlaneY,
 	}
 end
 
@@ -2115,7 +2118,7 @@ function GPS:UnprojectMarker(marker, mapObjects)
 		+ cameraCFrame.UpVector * (ndcY * tanHalfFov)
 	if math.abs(rayDirection.Y) < 0.0001 then return nil end
 
-	local distance = (mapObjects.MapBase.Position.Y - cameraCFrame.Position.Y) / rayDirection.Y
+	local distance = (mapObjects.MapPlaneY - cameraCFrame.Position.Y) / rayDirection.Y
 	if distance <= 0 or distance ~= distance or distance == math.huge then return nil end
 	local point = cameraCFrame.Position + rayDirection * distance
 	return Vector2.new(point.X, point.Z)
@@ -2167,19 +2170,10 @@ function GPS:Teleport()
 	Spectate:Stop(true)
 	root.AssemblyLinearVelocity = Vector3.zero
 	root.AssemblyAngularVelocity = Vector3.zero
-	local rotation = root.CFrame.Rotation
-	local ok = pcall(function()
-		-- Match the external's direct GPS path: write the root position 15 times
-		-- at 10 ms intervals to prevent dragging/rubber-banding.
-		for _ = 1, 15 do
-			root.CFrame = CFrame.new(target) * rotation
-			root.AssemblyLinearVelocity = Vector3.zero
-			root.AssemblyAngularVelocity = Vector3.zero
-			task.wait(0.01)
-		end
-	end)
+	local offset = target - root.Position
+	local ok = pcall(function() character:PivotTo(character:GetPivot() + offset) end)
 	if not ok then self:SetStatus("Teleport failed"); return false end
-	task.wait(0.1)
+	task.wait(0.2)
 	if not root.Parent or (root.Position - target).Magnitude > 80 then
 		self:SetStatus("Teleport was rejected")
 		return false
