@@ -30,6 +30,15 @@ local CROPS = {
 	{ "Corn",        Vector3.new(-4528.1, 117.1, 416.0), Vector3.new(-4539.6, 125.5, 421.1), Vector3.new(0.796, -0.487, -0.358) },
 	{ "Grape",       Vector3.new(-5215.9, 97.4, -543.3), Vector3.new(-5227.5, 105.9, -548.1), Vector3.new(0.803, -0.496, 0.331) },
 }
+local IMAGE_BASE = "https://raw.githubusercontent.com/bewmaki/yedhee/main/assets/candy/"
+local CANDY_ICONS = {
+	Cauliflower = IMAGE_BASE .. "cauliflower.png",
+	Peach = IMAGE_BASE .. "peach.png",
+	Orange = IMAGE_BASE .. "orange.png",
+	Corn = IMAGE_BASE .. "corn.png",
+	Grape = IMAGE_BASE .. "grape.png",
+	SeedCandy = IMAGE_BASE .. "seed-candy.png",
+}
 local REBEL = { nil, Vector3.new(4188.2, 14.9, 4644.4), Vector3.new(4172.4, 25.7, 4642.4), Vector3.new(0.854, -0.508, 0.109) }
 local CRAFT = { nil, Vector3.new(-329.9, 2.2, 485.6), Vector3.new(-321.0, 7.5, 484.8), Vector3.new(-0.911, -0.403, 0.085) }
 local STAGES = { [0]="Idle", "Opening locker", "Scanning inventory", "Farming", "Farm cooldown", "Crafting SeedCandy x5", "Depositing SeedCandy", "Retrying" }
@@ -44,6 +53,27 @@ for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = 0 end
 
 local statusLabel, craftedLabel
 local countLabels = {}
+
+local function attachIcon(label, url)
+	if not label or not label.UI or not label.UI.Framework then return end
+	local icon = Instance.new("ImageLabel")
+	icon.Name = "CandyIcon"
+	icon.AnchorPoint = Vector2.new(1, 0.5)
+	icon.Position = UDim2.new(1, -4, 0.5, 0)
+	icon.Size = UDim2.fromOffset(34, 34)
+	icon.BackgroundTransparency = 1
+	icon.ScaleType = Enum.ScaleType.Fit
+	icon.ZIndex = 4
+	icon.Parent = label.UI.Framework
+	task.spawn(function()
+		local ok, asset = pcall(function()
+			return Library:ResolveImageTextboxPreview(url)
+		end)
+		if ok and type(asset) == "string" and asset ~= "" and icon.Parent then
+			icon.Image = asset
+		end
+	end)
+end
 
 local function updateStatus(note)
 	local text = "Status: " .. (STAGES[Farm.Stage] or "Unknown")
@@ -105,8 +135,10 @@ end
 local function visible(gui)
 	if not gui or not gui:IsA("GuiObject") then return false end
 	local node = gui
-	while node and node:IsA("GuiObject") do
-		if not node.Visible then return false end
+	while node do
+		if node:IsA("GuiObject") and not node.Visible then return false end
+		if node:IsA("CanvasGroup") and node.GroupTransparency >= 0.99 then return false end
+		if node:IsA("ScreenGui") and not node.Enabled then return false end
 		node = node.Parent
 	end
 	return gui.AbsoluteSize.X > 0 and gui.AbsoluteSize.Y > 0
@@ -210,28 +242,106 @@ end
 
 local function inventoryPanel()
 	local gui = player:FindFirstChildOfClass("PlayerGui")
+
+	-- Current Some Town inventory:
+	-- PlayerGui/Inventory/CanvasGroup/Main/Body/<Item>/Main/Amount
+	local inventory = gui and gui:FindFirstChild("Inventory")
+	local canvas = inventory and inventory:FindFirstChild("CanvasGroup")
+	local modernMain = canvas and canvas:FindFirstChild("Main")
+	local modernBody = modernMain and modernMain:FindFirstChild("Body")
+	if modernBody and modernBody:IsA("ScrollingFrame") and visible(modernBody) then
+		return modernBody, "modern"
+	end
+
+	-- Older inventory used by the original External implementation.
 	local backpack = gui and gui:FindFirstChild("Backpack_Never")
 	local bg = backpack and backpack:FindFirstChild("BG")
 	local items = bg and bg:FindFirstChild("item")
 	local scrolling = items and items:FindFirstChild("Scrollingitem")
-	return bg and visible(bg) and scrolling or nil
+	if bg and visible(bg) and scrolling then return scrolling, "legacy" end
+	return nil, nil
+end
+
+local function waitInventoryCards(panel, id)
+	local lastCount, stableSamples = -1, 0
+	for _ = 1, 40 do
+		if not active(id) then return false end
+		local count = 0
+		for _, child in ipairs(panel:GetChildren()) do
+			if child:IsA("Frame") then count += 1 end
+		end
+		if count > 0 and count == lastCount then
+			stableSamples += 1
+		else
+			stableSamples = 0
+		end
+		if stableSamples >= 3 then return true end
+		lastCount = count
+		task.wait(0.15)
+	end
+	return false
+end
+
+local function modernItemCount(panel, itemName)
+	local card = panel:FindFirstChild(itemName)
+	local main = card and card:FindFirstChild("Main")
+	local amount = main and main:FindFirstChild("Amount")
+	if not amount or not (amount:IsA("TextLabel") or amount:IsA("TextButton")) then
+		return 0, false
+	end
+	local current = parseCount(amount.Text)
+	return current or 0, current ~= nil
+end
+
+local function selectModernInventoryAll()
+	local gui = player:FindFirstChildOfClass("PlayerGui")
+	local inventory = gui and gui:FindFirstChild("Inventory")
+	local canvas = inventory and inventory:FindFirstChild("CanvasGroup")
+	local main = canvas and canvas:FindFirstChild("Main")
+	local header = main and main:FindFirstChild("Header")
+	local category = header and header:FindFirstChild("Category")
+	local allButton = category and category:FindFirstChild("All")
+	if allButton and allButton:IsA("GuiObject") then
+		return click(allButton)
+	end
+	return false
 end
 
 local function scanInventory(id)
 	stage(2)
 	local opened = inventoryPanel() == nil
 	if opened then key(Enum.KeyCode.T) end
-	local panel = waitFor(inventoryPanel, 3, id)
+	local panel = waitFor(function()
+		local root = inventoryPanel()
+		return root
+	end, 5, id)
 	if not panel then return false end
-	if not waitActive(0.7, id) then return false end
+	local _, mode = inventoryPanel()
+	if mode == "modern" then
+		selectModernInventoryAll()
+		if not waitActive(0.5, id) then return false end
+	end
+	if not waitInventoryCards(panel, id) then return false end
+	if not waitActive(0.5, id) then return false end
+
+	local observed = {}
 	for scan = 1, 3 do
 		for _, crop in ipairs(CROPS) do
-			local count, found = itemCount(panel, crop[1])
-			if found then Farm.Counts[crop[1]] = math.max(Farm.Counts[crop[1]] or 0, count) end
+			local count, found
+			if mode == "modern" then
+				count, found = modernItemCount(panel, crop[1])
+			else
+				count, found = itemCount(panel, crop[1])
+			end
+			if found then observed[crop[1]] = math.max(observed[crop[1]] or 0, count) end
 		end
-		updateStatus()
 		if scan < 3 and not waitActive(0.35, id) then return false end
 	end
+
+	-- Commit the scan only after all polling passes. Missing cards in the fully
+	-- populated modern inventory mean a real zero, not "GUI still loading".
+	for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = observed[crop[1]] or 0 end
+	updateStatus("Inventory checked: " .. (mode or "unknown"))
 	if opened and inventoryPanel() then key(Enum.KeyCode.T); waitActive(0.3, id) end
 	return active(id)
 end
@@ -445,8 +555,13 @@ Controls:Slider({ Name="Teleport Y Offset", Flag="SolixCandyYOffset", Min=0, Max
 	Callback=function(value) Farm.Settings.YOffset=value end })
 
 statusLabel = Monitor:Label("Status: Idle")
-for _, crop in ipairs(CROPS) do countLabels[crop[1]] = Monitor:Label(crop[1]..": 0 / 100") end
-craftedLabel = Monitor:Label("SeedCandy crafted: 0")
+for _, crop in ipairs(CROPS) do
+	local label = Monitor:Label({ Name=crop[1]..": 0 / 100", Description="Candy ingredient" })
+	countLabels[crop[1]] = label
+	attachIcon(label, CANDY_ICONS[crop[1]])
+end
+craftedLabel = Monitor:Label({ Name="SeedCandy crafted: 0", Description="Output produced this run" })
+attachIcon(craftedLabel, CANDY_ICONS.SeedCandy)
 Monitor:Label({ Name="External flow", Description="Cauliflower > Peach > Orange > Corn > Grape; 100 each, 30-second cooldown, craft SeedCandy x5, then deposit at REBEL." })
 
 Library:CreateSettingsPage(Window)
