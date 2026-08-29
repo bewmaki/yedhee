@@ -1180,10 +1180,11 @@ local ESP = {
 	Objects = {},
 	Connection = nil,
 	Accumulator = 0,
-	UpdateInterval = IS_MOBILE and 0.16 or 0.1,
+	UpdateInterval = IS_MOBILE and 0.2 or 0.12,
 	ProxyCharacters = {},
-	NextProxyScan = 0,
+	NextProxyScan = {},
 	RootGui = nil,
+	NextStatusUpdate = 0,
 }
 
 local ARMOR_NAMES = { "AmmorHeal", "Armor", "Armour", "ArmorValue", "ArmourValue", "Shield", "Vest", "Protection" }
@@ -1225,28 +1226,31 @@ local function usableCharacter(character)
 		and (math.abs(position.X) >= 0.1 or math.abs(position.Y) >= 0.1 or math.abs(position.Z) >= 0.1)
 end
 
-function ESP:ScanWorkspaceProxies(force)
-	if not force and os.clock() < self.NextProxyScan then return end
-	self.NextProxyScan = os.clock() + 2
-	local wanted = {}
-	for _, target in ipairs(Players:GetPlayers()) do wanted[target.Name] = true end
-	local resolved = {}
-	for _, instance in ipairs(Workspace:GetDescendants()) do
-		if instance:IsA("Model") and wanted[instance.Name] and usableCharacter(instance) then
-			resolved[instance.Name] = instance
-		end
+function ESP:ResolveWorkspaceProxy(target, force)
+	if not target then return nil end
+	local cached = self.ProxyCharacters[target]
+	if cached and cached.Parent and usableCharacter(cached) then return cached end
+
+	local now = os.clock()
+	if not force and now < (self.NextProxyScan[target] or 0) then return nil end
+	self.NextProxyScan[target] = now + 8
+
+	-- Find only the requested player.  Scanning every descendant for every ESP
+	-- refresh caused a visible hitch on Never Town's large Workspace.
+	local candidate = Workspace:FindFirstChild(target.Name, true)
+	if candidate and candidate:IsA("Model") and usableCharacter(candidate) then
+		self.ProxyCharacters[target] = candidate
+		return candidate
 	end
-	self.ProxyCharacters = resolved
+	self.ProxyCharacters[target] = nil
+	return nil
 end
 
 local function resolvePlayerCharacter(target)
 	if not target then return nil end
-	ESP:ScanWorkspaceProxies(false)
-	local proxy = ESP.ProxyCharacters[target.Name]
-	if proxy and proxy.Parent and usableCharacter(proxy) then return proxy end
 	local character = target.Character
 	if character and character.Parent and usableCharacter(character) then return character end
-	return nil
+	return ESP:ResolveWorkspaceProxy(target, false)
 end
 
 local function addCorner(instance, radius)
@@ -1371,6 +1375,30 @@ function ESP:GetArmor(target, character, humanoid)
 	return math.clamp(armor, 0, maximum), maximum
 end
 
+local function projectESPPoint(camera, character, root, adornee, distance)
+	local candidates = {
+		adornee and (adornee.Position + Vector3.new(0, 0.75, 0)),
+		adornee and adornee.Position,
+		root and (root.Position + Vector3.new(0, 2.4, 0)),
+		root and root.Position,
+	}
+	for _, worldPoint in ipairs(candidates) do
+		if worldPoint then
+			local point = camera:WorldToViewportPoint(worldPoint)
+			if point.Z > 0.05 then return point end
+		end
+	end
+
+	-- When the camera clips into a nearby character every centre point may be
+	-- behind the near plane although the body is still visible. Keep its ESP
+	-- at screen centre instead of blinking off.
+	if distance <= 12 then
+		local viewport = camera.ViewportSize
+		return Vector3.new(viewport.X * 0.5, viewport.Y * 0.5, 0.05)
+	end
+	return nil
+end
+
 function ESP:RefreshPlayer(target, localRoot)
 	if target == player then return end
 	local character = resolvePlayerCharacter(target)
@@ -1378,7 +1406,8 @@ function ESP:RefreshPlayer(target, localRoot)
 	local root = findCharacterRoot(character)
 	local adornee = character and (character:FindFirstChild("Head") or root)
 	if not humanoid or not root or not adornee or humanoid.Health <= 0 then
-		self:DestroyPlayer(target)
+		local stale = self.Objects[target]
+		if stale and stale.Gui then stale.Gui.Visible = false end
 		return
 	end
 
@@ -1389,8 +1418,8 @@ function ESP:RefreshPlayer(target, localRoot)
 
 	local distance = localRoot and (root.Position - localRoot.Position).Magnitude or math.huge
 	local camera = Workspace.CurrentCamera
-	local screenPoint = camera and camera:WorldToViewportPoint(adornee.Position + Vector3.new(0, 1.1, 0))
-	local onRange = self.Enabled and camera ~= nil and screenPoint.Z > 0 and distance <= self.MaxDistance
+	local screenPoint = camera and projectESPPoint(camera, character, root, adornee, distance)
+	local onRange = self.Enabled and camera ~= nil and screenPoint ~= nil and distance <= self.MaxDistance
 	object.Gui.Visible = onRange
 	if not onRange then return end
 	local viewport = camera.ViewportSize
@@ -1438,7 +1467,8 @@ function ESP:RefreshAll()
 	for _, object in pairs(self.Objects) do
 		if object.Gui and object.Gui.Visible then rendered += 1 end
 	end
-	if espStatusLabel then
+	if espStatusLabel and os.clock() >= self.NextStatusUpdate then
+		self.NextStatusUpdate = os.clock() + 1
 		espStatusLabel:SetText(string.format("ESP: %s | players: %d | rendered: %d", self.Enabled and "ON" or "OFF", total, rendered))
 	end
 end
@@ -1447,7 +1477,7 @@ function ESP:Start()
 	if self.Enabled and self.Connection then return end
 	self.Enabled = true
 	self.Accumulator = 0
-	self:ScanWorkspaceProxies(true)
+	self.NextStatusUpdate = 0
 	self:RefreshAll()
 	if self.Connection then self.Connection:Disconnect() end
 	self.Connection = RunService.Heartbeat:Connect(function(delta)
@@ -1465,6 +1495,8 @@ function ESP:Stop()
 	for target in pairs(self.Objects) do targets[#targets + 1] = target end
 	for _, target in ipairs(targets) do self:DestroyPlayer(target) end
 	if self.RootGui then pcall(self.RootGui.Destroy, self.RootGui); self.RootGui = nil end
+	self.ProxyCharacters = {}
+	self.NextProxyScan = {}
 	if espStatusLabel then espStatusLabel:SetText("ESP: OFF") end
 end
 
