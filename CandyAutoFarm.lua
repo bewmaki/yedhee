@@ -97,6 +97,11 @@ if type(previousInvisible) == "table" and type(previousInvisible.Stop) == "funct
 	pcall(previousInvisible.Stop, previousInvisible, true)
 end
 getgenv().AraiInvisible = nil
+local previousAntiAFK = getgenv().AraiAntiAFK
+if type(previousAntiAFK) == "table" and type(previousAntiAFK.Stop) == "function" then
+	pcall(previousAntiAFK.Stop, previousAntiAFK)
+end
+getgenv().AraiAntiAFK = nil
 
 local CROPS = {
 	{ "Cauliflower", Vector3.new(-4167.1, 74.5, 1250.2), Vector3.new(-4145.3, 84.5, 1253.4), Vector3.new(-0.922, -0.363, -0.136) },
@@ -671,18 +676,55 @@ local function farmCrop(crop, id)
 end
 
 local function closeGui(bg)
-	local exit = bg and (bg:FindFirstChild("Exit") or exact(bg, "Exit") or exact(bg, "Close"))
-	if exit then
-		click(exit)
-		if IS_MOBILE then
-			task.wait(0.15)
-			if visible(bg) and exit:IsA("GuiButton") and type(firesignal) == "function" then
-				pcall(function() firesignal(exit.Activated) end)
+	if not bg then return true end
+	local function closed()
+		return not bg.Parent or not visible(bg)
+	end
+	if closed() then return true end
+
+	local candidates, seen = {}, {}
+	local function addCandidate(object)
+		if not object or seen[object] then return end
+		local button = object
+		while button and button ~= bg do
+			if button:IsA("GuiButton") then break end
+			button = button.Parent
+		end
+		if not button or button == bg or not button:IsA("GuiButton") then
+			button = nil
+			for _, descendant in ipairs(object:GetDescendants()) do
+				if descendant:IsA("GuiButton") and visible(descendant) then button = descendant; break end
 			end
 		end
-	elseif not IS_MOBILE then
-		key(Enum.KeyCode.Escape)
+		if button and visible(button) and not seen[button] then
+			seen[button] = true
+			candidates[#candidates + 1] = button
+		end
 	end
+
+	for _, object in ipairs(bg:GetDescendants()) do
+		local name = string.lower(object.Name)
+		local text = (object:IsA("TextButton") or object:IsA("TextLabel")) and string.lower(object.Text) or ""
+		if name == "exit" or name == "close" or name == "closebutton" or name == "x"
+			or text == "x" or text == "close" then
+			addCandidate(object)
+		end
+	end
+
+	local topRight = bg.AbsolutePosition + Vector2.new(bg.AbsoluteSize.X, 0)
+	table.sort(candidates, function(left, right)
+		local leftCenter = left.AbsolutePosition + left.AbsoluteSize / 2
+		local rightCenter = right.AbsolutePosition + right.AbsoluteSize / 2
+		return (leftCenter - topRight).Magnitude < (rightCenter - topRight).Magnitude
+	end)
+	for _, button in ipairs(candidates) do
+		if clickAndConfirm(button, closed, nil, 0.45) then return true end
+	end
+
+	-- Escape is a final fallback for layouts whose close icon is not named.
+	pcall(function() key(Enum.KeyCode.Escape, 0.08) end)
+	if waitFor(closed, 0.8) then return true end
+	return closed()
 end
 
 local function craftUI()
@@ -889,8 +931,12 @@ local function craftSeedCandy(id)
 	end, id, 1.5) then
 		closeGui(bg); return false
 	end
-	if not waitActive(12, id) then return false end
-	closeGui(bg); Farm.Crafted += 5
+	if not waitActive(12, id) then closeGui(bg); return false end
+	if not closeGui(bg) then
+		task.wait(0.25)
+		closeGui(bg)
+	end
+	Farm.Crafted += 5
 	for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = math.max(0, Farm.Counts[crop[1]]-100) end
 	updateStatus(); return true
 end
@@ -967,6 +1013,8 @@ end
 
 function Farm:Stop()
 	self.Enabled=false; self.RunId+=1; self.Stage=0; self.NextCrop=nil; self.Cooldown=0
+	local openCraft = craftUI()
+	if openCraft then task.spawn(function() closeGui(openCraft) end) end
 	updateStatus("Stopped")
 end
 
@@ -2280,14 +2328,50 @@ function Invisible:Stop(quiet)
 	end
 end
 
+local AntiAFK = {
+	Enabled = false,
+	Connection = nil,
+	Busy = false,
+}
+
+function AntiAFK:Pulse()
+	if not self.Enabled or self.Busy then return end
+	self.Busy = true
+	task.spawn(function()
+		local camera = Workspace.CurrentCamera
+		local cameraCFrame = camera and camera.CFrame or CFrame.new()
+		pcall(function()
+			VirtualUser:CaptureController()
+			VirtualUser:Button2Down(Vector2.zero, cameraCFrame)
+			task.wait(0.1)
+			VirtualUser:Button2Up(Vector2.zero, cameraCFrame)
+		end)
+		self.Busy = false
+	end)
+end
+
+function AntiAFK:Start()
+	if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
+	self.Enabled = true
+	self.Connection = player.Idled:Connect(function() self:Pulse() end)
+end
+
+function AntiAFK:Stop()
+	self.Enabled = false
+	self.Busy = false
+	if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
+end
+
 getgenv().AraiSpectate = Spectate
 getgenv().AraiGPS = GPS
 getgenv().AraiInvisible = Invisible
+getgenv().AraiAntiAFK = AntiAFK
 
 Farm.ESP = ESP
 Farm.Spectate = Spectate
 Farm.GPS = GPS
 Farm.Invisible = Invisible
+Farm.AntiAFK = AntiAFK
 getgenv().AraiESP = ESP
 
 local Window = Library:Window({ Name="A-RAI HUB | Never Town", Game="Never Town" })
@@ -2402,11 +2486,14 @@ end
 craftedLabel = Monitor:Label({ Name="SeedCandy crafted: 0" })
 attachIcon(craftedLabel, CANDY_ICONS.SeedCandy)
 
+local antiAFKToggle = DeviceSettings:Toggle({ Name="Anti AFK", Flag="AraiAntiAFKEnabled", Default=true,
+	Callback=function(value) if value then AntiAFK:Start() else AntiAFK:Stop() end end })
 DeviceSettings:Label({ Name=IS_MOBILE and "Device: Mobile Touch" or "Device: PC Keyboard" })
 DeviceSettings:Label({ Name=IS_MOBILE and "ESP Update Rate: 30 FPS" or "ESP Update Rate: 60 FPS" })
 
 local baseLibraryUnload = Library.Unload
 function Library:Unload(...)
+	AntiAFK:Stop()
 	Invisible:Stop(true)
 	Spectate:Shutdown()
 	GPS:Stop()
@@ -2419,6 +2506,7 @@ end
 Spectate:StartMonitor()
 Spectate:RefreshPlayers()
 GPS:Start()
+if antiAFKToggle.Value then AntiAFK:Start() end
 
 Window:SetOpen(true)
 updateStatus()
