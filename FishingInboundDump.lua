@@ -46,6 +46,7 @@ local State = {
     Enabled = true,
     Connections = {},
     Lines = {},
+    SnapshottedRounds = {},
 }
 env.FishingInboundDump = State
 
@@ -248,7 +249,8 @@ for _, remote in ipairs(Fish:GetChildren()) do
             if not State.Enabled then
                 return
             end
-            recordEvent(remote, ...)
+            local arguments = table.pack(...)
+            recordEvent(remote, table.unpack(arguments, 1, arguments.n))
             if remote.Name == "MiniGameStart" then
                 task.defer(function()
                     snapshotUi("MiniGameStart immediate")
@@ -256,6 +258,21 @@ for _, remote in ipairs(Fish:GetChildren()) do
                 task.delay(0.25, function()
                     snapshotUi("MiniGameStart +0.25s")
                 end)
+            elseif remote.Name == "MiniGameFeedback" then
+                local payload = arguments[1]
+                local roundId = type(payload) == "table" and payload.roundId or nil
+                if type(roundId) == "string" and not State.SnapshottedRounds[roundId] then
+                    State.SnapshottedRounds[roundId] = true
+                    task.defer(function()
+                        snapshotUi("First feedback immediate | " .. roundId)
+                    end)
+                    task.delay(0.10, function()
+                        snapshotUi("First feedback +0.10s | " .. roundId)
+                    end)
+                    task.delay(0.20, function()
+                        snapshotUi("First feedback +0.20s | " .. roundId)
+                    end)
+                end
             end
         end)
         State.Connections[#State.Connections + 1] = connection
