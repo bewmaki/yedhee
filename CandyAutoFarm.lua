@@ -152,13 +152,13 @@ end
 
 local function click(gui)
 	if not gui or not gui:IsA("GuiObject") then return false end
-	if type(firesignal) == "function" then
-		local ok, signal = pcall(function() return gui.Activated end)
-		if ok and signal and pcall(firesignal, signal) then return true end
-	end
+	-- Use a real pointer click for game-owned UI. Some executors return success
+	-- from firesignal without Roblox's crafting controller receiving the action.
 	local point = gui.AbsolutePosition + gui.AbsoluteSize / 2
+	VIM:SendMouseMoveEvent(point.X, point.Y, game)
+	task.wait(0.05)
 	VIM:SendMouseButtonEvent(point.X, point.Y, 0, true, game, 0)
-	task.wait(0.04)
+	task.wait(0.08)
 	VIM:SendMouseButtonEvent(point.X, point.Y, 0, false, game, 0)
 	return true
 end
@@ -442,12 +442,12 @@ local function clickableFrom(object, boundary)
 	local node = object
 	while node and node ~= boundary do
 		if node:IsA("GuiButton") then return node end
-		node = node.Parent
-	end
-	if object then
-		for _, child in ipairs(object:GetDescendants()) do
+		-- New craft cards keep ItemName beside a child Main/ImageButton rather
+		-- than inside it. Search each enclosing card before moving upward.
+		for _, child in ipairs(node:GetDescendants()) do
 			if child:IsA("GuiButton") and visible(child) then return child end
 		end
+		node = node.Parent
 	end
 	return object
 end
@@ -531,7 +531,7 @@ local function requirementsReady(bg)
 end
 
 local function craftSeedCandy(id)
-	stage(5)
+	stage(5, nil, "Opening Craft UI")
 	if not near(CRAFT[2]) and not warp(CRAFT[2], id) then return false end
 	local bg
 	for _ = 1, 3 do
@@ -552,12 +552,14 @@ local function craftSeedCandy(id)
 	local seed = (listFrame and exact(listFrame, "SeedCandy")) or visibleText(bg, "SeedCandy")
 	if not seed then closeGui(bg); return false end
 	local card = clickableFrom(seed, bg)
+	stage(5, nil, "Selecting SeedCandy")
 	click(card); if not waitActive(0.6, id) then return false end
 	local amount, quantityContainer = findQuantityLabel(bg)
 	if not amount then closeGui(bg); return false end
 	for _ = 1, 8 do
 		local quantity = tonumber(amount.Text)
 		if quantity == 5 then break end
+		stage(5, nil, "Quantity " .. tostring(quantity or "?") .. " -> 5")
 		local adjust = findQuantityButton(bg, amount, quantityContainer, (quantity or 0) < 5)
 		if not adjust then closeGui(bg); return false end
 		click(adjust); waitActive(0.4, id)
@@ -569,6 +571,7 @@ local function craftSeedCandy(id)
 	local main = bg:FindFirstChild("Main")
 	local craftText = visibleText(bg, "CRAFT")
 	local craftButton = (main and main:FindFirstChild("Craft")) or clickableFrom(craftText, bg)
+	stage(5, nil, "Clicking CRAFT")
 	if not craftButton or not click(craftButton) then closeGui(bg); return false end
 	if not waitActive(12, id) then return false end
 	closeGui(bg); Farm.Crafted += 5
