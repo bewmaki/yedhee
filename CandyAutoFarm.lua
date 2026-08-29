@@ -2646,7 +2646,7 @@ Controls:Slider({ Name="Teleport Y Offset", Flag="AraiCandyYOffset", Min=0, Max=
 	Callback=function(value) Farm.Settings.YOffset=value end })
 
 local fishingToggle
-fishingToggle = FishingControls:Toggle({ Name="Auto Perfect", Flag="AraiFishingAutoPerfectEnabled", Default=false,
+fishingToggle = FishingControls:Toggle({ Name="Auto Fishing", Flag="AraiAutoFishing", Default=false,
 	Callback=function(value)
 		if value then
 			if not FishingAutoPerfect:Start() then
