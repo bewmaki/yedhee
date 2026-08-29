@@ -2051,7 +2051,12 @@ function GPS:FindMapObjects()
 	local playerGui = player:FindFirstChildOfClass("PlayerGui")
 	if not playerGui then return nil, "PlayerGui is not ready" end
 
-	local mapFrame = playerGui:FindFirstChild("MapFrame", true)
+	-- Never Town keeps the full map under PlayerGui/MiniMap.  Resolve this
+	-- path first so another unrelated MapFrame cannot be selected on mobile or
+	-- after the UI has been recreated.
+	local miniMap = playerGui:FindFirstChild("MiniMap")
+	local mapFrame = miniMap and miniMap:FindFirstChild("MapFrame", true)
+		or playerGui:FindFirstChild("MapFrame", true)
 	if not mapFrame then return nil, "Open the in-game map once" end
 	local viewport = mapFrame:FindFirstChild("ViewportFrame", true)
 	if not viewport or not viewport:IsA("ViewportFrame") then
@@ -2093,7 +2098,9 @@ function GPS:UnprojectMarker(marker, mapObjects)
 
 	local tanHalfFov = math.tan(fieldOfView * 0.5)
 	local aspect = viewportSize.X / viewportSize.Y
-	local rayDirection = cameraCFrame.LookVector
+	-- ViewportFrame cameras store the back/Z vector in CFrame.LookVector for
+	-- this map.  The world ray therefore starts in the inverse direction.
+	local rayDirection = -cameraCFrame.LookVector
 		+ cameraCFrame.RightVector * (ndcX * aspect * tanHalfFov)
 		+ cameraCFrame.UpVector * (ndcY * tanHalfFov)
 	if math.abs(rayDirection.Y) < 0.0001 then return nil end
