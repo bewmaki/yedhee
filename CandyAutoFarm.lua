@@ -3,6 +3,8 @@
 
 local Players = game:GetService("Players")
 local VIM = game:GetService("VirtualInputManager")
+local VirtualUser = game:GetService("VirtualUser")
+local GuiService = game:GetService("GuiService")
 local Workspace = game:GetService("Workspace")
 local player = Players.LocalPlayer
 
@@ -163,20 +165,74 @@ local function click(gui)
 	return true
 end
 
-local function clickAndConfirm(gui, confirm, id)
+local function clickAndConfirm(gui, confirm, id, confirmWait)
 	if not gui or not confirm then return false end
-	click(gui)
-	if waitFor(confirm, 0.7, id) then return true end
+	confirmWait = confirmWait or 0.85
+	local point = gui.AbsolutePosition + gui.AbsoluteSize / 2
+	local camera = Workspace.CurrentCamera
+	local environment = type(getgenv) == "function" and getgenv() or _G
 
-	-- Some executors expose VirtualInputManager but the game's LocalScript does
-	-- not receive its pointer event. Only use firesignal after confirming that
-	-- the real click made no state change, so quantity cannot be incremented twice.
-	if type(firesignal) == "function" and gui:IsA("GuiButton") then
-		pcall(function() firesignal(gui.Activated) end)
-		if waitFor(confirm, 0.5, id) then return true end
-		pcall(function() firesignal(gui.MouseButton1Click) end)
-		if waitFor(confirm, 0.5, id) then return true end
+	local methods = {
+		function() click(gui) end,
+		function()
+			-- Selectable=true in the focused dump, so keyboard activation can
+			-- reach the controller even when pointer injection is blocked.
+			GuiService.SelectedObject = gui
+			key(Enum.KeyCode.Return, 0.08)
+		end,
+		function()
+			VirtualUser:ClickButton1(point, camera and camera.CFrame or CFrame.new())
+		end,
+		function()
+			local move = environment.mousemoveabs or environment.mousemoveabsolute
+			local press = environment.mouse1click
+			if type(move) == "function" and type(press) == "function" then
+				move(point.X, point.Y)
+				task.wait(0.05)
+				press()
+			end
+		end,
+	}
+
+	for _, method in ipairs(methods) do
+		pcall(method)
+		if waitFor(confirm, confirmWait, id) then
+			pcall(function() GuiService.SelectedObject = nil end)
+			return true
+		end
 	end
+
+	-- Only fire/invoke button handlers after every real-input method was
+	-- confirmed to make no change. This prevents a late click from changing the
+	-- quantity twice.
+	if gui:IsA("GuiButton") then
+		local signalNames = { "Activated", "MouseButton1Click" }
+		if type(firesignal) == "function" then
+			for _, signalName in ipairs(signalNames) do
+				pcall(function() firesignal(gui[signalName]) end)
+				if waitFor(confirm, confirmWait, id) then return true end
+			end
+		end
+
+		if type(getconnections) == "function" then
+			for _, signalName in ipairs(signalNames) do
+				local ok, connections = pcall(getconnections, gui[signalName])
+				if ok and type(connections) == "table" then
+					for _, connection in ipairs(connections) do
+						pcall(function()
+							if type(connection.Fire) == "function" then
+								connection:Fire()
+							elseif type(connection.Function) == "function" then
+								connection.Function()
+							end
+						end)
+					end
+					if waitFor(confirm, confirmWait, id) then return true end
+				end
+			end
+		end
+	end
+	pcall(function() GuiService.SelectedObject = nil end)
 	return false
 end
 
@@ -632,7 +688,15 @@ local function craftSeedCandy(id)
 	local craftText = visibleText(bg, "CRAFT")
 	local craftButton = (main and main:FindFirstChild("Craft")) or clickableFrom(craftText, bg)
 	stage(5, nil, "Clicking CRAFT")
-	if not craftButton or not click(craftButton) then closeGui(bg); return false end
+	local loading = main and main:FindFirstChild("Loading")
+	local loadingBefore = loading and loading.Text
+	if not craftButton or not clickAndConfirm(craftButton, function()
+		return (loading and loading.Text ~= loadingBefore)
+			or not visible(craftButton)
+			or not craftButton.Active
+	end, id, 1.5) then
+		closeGui(bg); return false
+	end
 	if not waitActive(12, id) then return false end
 	closeGui(bg); Farm.Crafted += 5
 	for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = math.max(0, Farm.Counts[crop[1]]-100) end
