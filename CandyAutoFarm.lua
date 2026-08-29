@@ -647,9 +647,26 @@ end
 local function closeGui(bg)
 	if not bg then return true end
 	local function closed()
-		return not bg.Parent or not visible(bg)
+		if not bg.Parent or not visible(bg) then return true end
+		-- Never Town closes panels by tweening them outside the viewport while
+		-- keeping Visible=true. Treat that final position as closed as well.
+		local camera = Workspace.CurrentCamera
+		local viewport = camera and camera.ViewportSize
+		if viewport then
+			local position, size = bg.AbsolutePosition, bg.AbsoluteSize
+			return position.X + size.X <= 0 or position.Y + size.Y <= 0
+				or position.X >= viewport.X or position.Y >= viewport.Y
+		end
+		return false
 	end
 	if closed() then return true end
+
+	-- The dump exposes this exact control with one MouseButton1Click listener:
+	-- PlayerGui/System/Craft/BG/Exit. Invoke it before any fuzzy fallback.
+	local exactExit = bg:FindFirstChild("Exit")
+	if exactExit and exactExit:IsA("GuiButton") and visible(exactExit) then
+		if activateAndConfirm(exactExit, closed, nil, 1.25) then return true end
+	end
 
 	local candidates, seen = {}, {}
 	local function addCandidate(object)
@@ -687,7 +704,7 @@ local function closeGui(bg)
 		return (leftCenter - topRight).Magnitude < (rightCenter - topRight).Magnitude
 	end)
 	for _, button in ipairs(candidates) do
-		if clickAndConfirm(button, closed, nil, 0.45) then return true end
+		if button ~= exactExit and activateAndConfirm(button, closed, nil, 1.25) then return true end
 	end
 
 	-- Never use Escape as a close fallback: it opens Roblox's system menu when
