@@ -163,6 +163,23 @@ local function click(gui)
 	return true
 end
 
+local function clickAndConfirm(gui, confirm, id)
+	if not gui or not confirm then return false end
+	click(gui)
+	if waitFor(confirm, 0.7, id) then return true end
+
+	-- Some executors expose VirtualInputManager but the game's LocalScript does
+	-- not receive its pointer event. Only use firesignal after confirming that
+	-- the real click made no state change, so quantity cannot be incremented twice.
+	if type(firesignal) == "function" and gui:IsA("GuiButton") then
+		pcall(function() firesignal(gui.Activated) end)
+		if waitFor(confirm, 0.5, id) then return true end
+		pcall(function() firesignal(gui.MouseButton1Click) end)
+		if waitFor(confirm, 0.5, id) then return true end
+	end
+	return false
+end
+
 local function promptPosition(prompt)
 	local parent = prompt.Parent
 	if parent:IsA("Attachment") then return parent.WorldPosition end
@@ -454,9 +471,21 @@ end
 
 local function findQuantityLabel(bg)
 	local frame = bg:FindFirstChild("Frame")
-	local image = frame and frame:FindFirstChild("ImageLabel")
-	local legacy = image and image:FindFirstChild("A")
-	if legacy and tonumber(legacy.Text) then return legacy, image end
+	-- The live dump contains two BG/Frame children both named ImageLabel.
+	-- Select the one that owns the exact A/U/D controls instead of relying on
+	-- FindFirstChild returning them in a particular replication order.
+	if frame then
+		for _, image in ipairs(frame:GetChildren()) do
+			if image.Name == "ImageLabel" then
+				local amount = image:FindFirstChild("A")
+				local up = image:FindFirstChild("U")
+				local down = image:FindFirstChild("D")
+				if amount and up and down and tonumber(amount.Text) then
+					return amount, image
+				end
+			end
+		end
+	end
 
 	local center = bg.AbsolutePosition + bg.AbsoluteSize / 2
 	local best, bestDistance
@@ -473,6 +502,27 @@ local function findQuantityLabel(bg)
 		end
 	end
 	return best, best and best.Parent or nil
+end
+
+local function selectedCraftName(bg)
+	local frame = bg:FindFirstChild("Frame")
+	if not frame then return nil end
+	for _, image in ipairs(frame:GetChildren()) do
+		local label = image.Name == "ImageLabel" and image:FindFirstChild("CraftText")
+		if label and (label:IsA("TextLabel") or label:IsA("TextButton")) then
+			return label.Text
+		end
+	end
+end
+
+local function seedCandyCard(listFrame, bg)
+	if not listFrame then return nil end
+	for _, card in ipairs(listFrame:GetChildren()) do
+		local itemName = card:FindFirstChild("ItemName")
+		if itemName and itemName:IsA("TextLabel") and itemName.Text == "SeedCandy" then
+			return card:IsA("GuiButton") and card or clickableFrom(card, bg)
+		end
+	end
 end
 
 local function findQuantityButton(bg, amount, container, increase)
@@ -549,11 +599,16 @@ local function craftSeedCandy(id)
 	end
 	local list = bg:FindFirstChild("ITlist")
 	local listFrame = list and list:FindFirstChild("Frame")
-	local seed = (listFrame and exact(listFrame, "SeedCandy")) or visibleText(bg, "SeedCandy")
-	if not seed then closeGui(bg); return false end
-	local card = clickableFrom(seed, bg)
+	local card = seedCandyCard(listFrame, bg)
+	if not card then closeGui(bg); return false end
 	stage(5, nil, "Selecting SeedCandy")
-	click(card); if not waitActive(0.6, id) then return false end
+	if selectedCraftName(bg) ~= "SeedCandy" then
+		if not clickAndConfirm(card, function()
+			return selectedCraftName(bg) == "SeedCandy"
+		end, id) then
+			closeGui(bg); return false
+		end
+	end
 	local amount, quantityContainer = findQuantityLabel(bg)
 	if not amount then closeGui(bg); return false end
 	for _ = 1, 8 do
@@ -562,7 +617,12 @@ local function craftSeedCandy(id)
 		stage(5, nil, "Quantity " .. tostring(quantity or "?") .. " -> 5")
 		local adjust = findQuantityButton(bg, amount, quantityContainer, (quantity or 0) < 5)
 		if not adjust then closeGui(bg); return false end
-		click(adjust); waitActive(0.4, id)
+		if not clickAndConfirm(adjust, function()
+			local refreshed = findQuantityLabel(bg)
+			return refreshed and tonumber(refreshed.Text) ~= quantity
+		end, id) then
+			closeGui(bg); return false
+		end
 		amount, quantityContainer = findQuantityLabel(bg)
 		if not amount then closeGui(bg); return false end
 	end
