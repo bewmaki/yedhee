@@ -321,6 +321,17 @@ local function clickAndConfirm(gui, confirm, id, confirmWait)
 	return false
 end
 
+local function activateAndConfirm(gui, confirm, id, confirmWait)
+	if not gui or not confirm then return false end
+	confirmWait = confirmWait or 0.85
+	-- Volt exposes one MouseButton1Click connection on the dumped Craft card,
+	-- U/D controls and CRAFT button. Invoke that exact game connection first.
+	pcall(activateGuiDirect, gui)
+	if waitFor(confirm, confirmWait, id) then return true end
+	-- Keep pointer/touch injection for executors that block connection access.
+	return clickAndConfirm(gui, confirm, id, confirmWait)
+end
+
 local function promptPosition(prompt)
 	local parent = prompt.Parent
 	if parent:IsA("Attachment") then return parent.WorldPosition end
@@ -850,18 +861,18 @@ local function craftSeedCandy(id)
 	local select = bg:FindFirstChild("Select")
 	local tableButton = select and select:FindFirstChild("ButtonTable")
 	if tableButton then
-		click(tableButton); waitActive(0.35, id)
+		activateGuiDirect(tableButton); waitActive(0.35, id)
 		local category = exact(select, "Category_CategoryCandy")
-		if category then click(category); waitActive(0.5, id) end
+		if category then activateGuiDirect(category); waitActive(0.5, id) end
 	end
 	local list = bg:FindFirstChild("ITlist")
 	local listFrame = list and list:FindFirstChild("Frame")
 	local card = seedCandyCard(listFrame)
 	if not card then closeGui(bg); return false end
 	stage(5, nil, "Selecting SeedCandy")
-	-- Always send a pointer/touch click to the exact card. CraftText can already
-	-- say SeedCandy, so verify the two selection frames instead of that text.
-	if not clickAndConfirm(card, function()
+	-- Always activate the exact dumped card. CraftText can already say
+	-- SeedCandy, so verify the two selection frames instead of that text.
+	if not activateAndConfirm(card, function()
 		return craftCardSelected(card)
 	end, id, 0.65) then
 		closeGui(bg); return false
@@ -875,7 +886,7 @@ local function craftSeedCandy(id)
 		stage(5, nil, "Quantity " .. tostring(quantity or "?") .. " -> 5")
 		local adjust = findQuantityButton(bg, amount, quantityContainer, (quantity or 0) < 5)
 		if not adjust then closeGui(bg); return false end
-		if not clickAndConfirm(adjust, function()
+		if not activateAndConfirm(adjust, function()
 			local refreshed = findQuantityLabel(bg)
 			return refreshed and tonumber(refreshed.Text) ~= quantity
 		end, id) then
@@ -892,7 +903,7 @@ local function craftSeedCandy(id)
 	stage(5, nil, "Clicking CRAFT")
 	local loading = main and main:FindFirstChild("Loading")
 	local loadingBefore = loading and loading.Text
-	if not craftButton or not clickAndConfirm(craftButton, function()
+	if not craftButton or not activateAndConfirm(craftButton, function()
 		return (loading and loading.Text ~= loadingBefore)
 			or not visible(craftButton)
 			or not craftButton.Active
