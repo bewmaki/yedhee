@@ -7,6 +7,7 @@ local VirtualUser = game:GetService("VirtualUser")
 local GuiService = game:GetService("GuiService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 local platformOk, platform = pcall(function() return UserInputService:GetPlatform() end)
 local mobilePlatform = platformOk and (platform == Enum.Platform.Android or platform == Enum.Platform.IOS)
@@ -40,6 +41,11 @@ if type(old) == "table" then
 		pcall(old.Consume.Stop, old.Consume)
 	end
 end
+local previousESP = getgenv().AraiESP
+if type(previousESP) == "table" and type(previousESP.Stop) == "function" then
+	pcall(previousESP.Stop, previousESP)
+end
+getgenv().AraiESP = nil
 
 local CROPS = {
 	{ "Cauliflower", Vector3.new(-4167.1, 74.5, 1250.2), Vector3.new(-4145.3, 84.5, 1253.4), Vector3.new(-0.922, -0.363, -0.136) },
@@ -1164,11 +1170,225 @@ function Consume:Stop()
 	updateConsumeUI("Disabled")
 end
 
+local ESP = {
+	Enabled = false,
+	ShowName = true,
+	ShowDistance = true,
+	ShowHealth = true,
+	ShowArmor = true,
+	MaxDistance = 1000,
+	Objects = {},
+	Connection = nil,
+	Accumulator = 0,
+	UpdateInterval = IS_MOBILE and 0.16 or 0.1,
+}
+
+local ARMOR_NAMES = { "Armor", "Armour", "ArmorValue", "ArmourValue", "Shield", "Vest", "Protection" }
+local MAX_ARMOR_NAMES = { "MaxArmor", "MaxArmour", "ArmorMax", "ArmourMax", "MaxShield", "MaxVest", "MaxProtection" }
+
+local function readReplicatedNumber(containers, names)
+	for _, container in ipairs(containers) do
+		if container then
+			for _, name in ipairs(names) do
+				local ok, attribute = pcall(container.GetAttribute, container, name)
+				if ok and type(attribute) == "number" then return attribute end
+				local valueObject = container:FindFirstChild(name, true)
+				if valueObject and (valueObject:IsA("NumberValue") or valueObject:IsA("IntValue")) then
+					return valueObject.Value
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function addCorner(instance, radius)
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, radius)
+	corner.Parent = instance
+end
+
+local function makeESPBar(parent, y, color)
+	local back = Instance.new("Frame")
+	back.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
+	back.BackgroundTransparency = 0.12
+	back.BorderSizePixel = 0
+	back.Position = UDim2.fromOffset(10, y)
+	back.Size = UDim2.new(1, -20, 0, 8)
+	back.Parent = parent
+	addCorner(back, 4)
+
+	local fill = Instance.new("Frame")
+	fill.BackgroundColor3 = color
+	fill.BorderSizePixel = 0
+	fill.Size = UDim2.fromScale(1, 1)
+	fill.Parent = back
+	addCorner(fill, 4)
+
+	local text = Instance.new("TextLabel")
+	text.BackgroundTransparency = 1
+	text.Size = UDim2.fromScale(1, 1)
+	text.Font = Enum.Font.GothamBold
+	text.TextColor3 = Color3.fromRGB(255, 255, 255)
+	text.TextSize = 9
+	text.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	text.TextStrokeTransparency = 0.25
+	text.ZIndex = 3
+	text.Parent = back
+
+	return back, fill, text
+end
+
+function ESP:DestroyPlayer(target)
+	local object = self.Objects[target]
+	if object and object.Gui then pcall(object.Gui.Destroy, object.Gui) end
+	self.Objects[target] = nil
+end
+
+function ESP:CreatePlayer(target, adornee)
+	self:DestroyPlayer(target)
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "AraiPlayerESP"
+	gui.Adornee = adornee
+	gui.AlwaysOnTop = true
+	gui.LightInfluence = 0
+	gui.MaxDistance = self.MaxDistance
+	gui.Size = UDim2.fromOffset(170, 62)
+	gui.StudsOffsetWorldSpace = Vector3.new(0, 3.25, 0)
+	gui.Enabled = false
+	gui.Parent = player:WaitForChild("PlayerGui")
+
+	local name = Instance.new("TextLabel")
+	name.BackgroundTransparency = 1
+	name.Size = UDim2.new(1, 0, 0, 16)
+	name.Font = Enum.Font.GothamBold
+	name.TextColor3 = Color3.fromRGB(255, 255, 255)
+	name.TextSize = 13
+	name.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	name.TextStrokeTransparency = 0.15
+	name.Parent = gui
+
+	local distance = Instance.new("TextLabel")
+	distance.BackgroundTransparency = 1
+	distance.Position = UDim2.fromOffset(0, 15)
+	distance.Size = UDim2.new(1, 0, 0, 13)
+	distance.Font = Enum.Font.GothamSemibold
+	distance.TextColor3 = Color3.fromRGB(205, 170, 255)
+	distance.TextSize = 11
+	distance.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	distance.TextStrokeTransparency = 0.2
+	distance.Parent = gui
+
+	local healthBack, healthFill, healthText = makeESPBar(gui, 31, Color3.fromRGB(72, 235, 112))
+	local armorBack, armorFill, armorText = makeESPBar(gui, 44, Color3.fromRGB(116, 91, 255))
+	local object = {
+		Gui = gui, Name = name, Distance = distance,
+		HealthBack = healthBack, HealthFill = healthFill, HealthText = healthText,
+		ArmorBack = armorBack, ArmorFill = armorFill, ArmorText = armorText,
+	}
+	self.Objects[target] = object
+	return object
+end
+
+function ESP:GetArmor(target, character, humanoid)
+	local containers = { character, humanoid, target }
+	local armor = readReplicatedNumber(containers, ARMOR_NAMES) or 0
+	local maximum = readReplicatedNumber(containers, MAX_ARMOR_NAMES) or 100
+	maximum = math.max(1, maximum)
+	return math.clamp(armor, 0, maximum), maximum
+end
+
+function ESP:RefreshPlayer(target, localRoot)
+	if target == player then return end
+	local character = target.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local root = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head"))
+	local adornee = character and (character:FindFirstChild("Head") or root)
+	if not humanoid or not root or not adornee or humanoid.Health <= 0 then
+		self:DestroyPlayer(target)
+		return
+	end
+
+	local object = self.Objects[target]
+	if not object or not object.Gui or not object.Gui.Parent then
+		object = self:CreatePlayer(target, adornee)
+	elseif object.Gui.Adornee ~= adornee then
+		object.Gui.Adornee = adornee
+	end
+
+	local distance = localRoot and (root.Position - localRoot.Position).Magnitude or math.huge
+	local onRange = self.Enabled and distance <= self.MaxDistance
+	object.Gui.Enabled = onRange
+	object.Gui.MaxDistance = self.MaxDistance
+	if not onRange then return end
+
+	object.Name.Visible = self.ShowName
+	object.Name.Text = target.DisplayName ~= target.Name and (target.DisplayName .. "  @" .. target.Name) or target.Name
+	object.Distance.Visible = self.ShowDistance
+	object.Distance.Text = tostring(math.floor(distance + 0.5)) .. "m"
+
+	local maxHealth = math.max(1, humanoid.MaxHealth)
+	local health = math.clamp(humanoid.Health, 0, maxHealth)
+	local healthRatio = health / maxHealth
+	object.HealthBack.Visible = self.ShowHealth
+	object.HealthFill.Size = UDim2.fromScale(healthRatio, 1)
+	object.HealthFill.BackgroundColor3 = Color3.fromRGB(math.floor(255 * (1 - healthRatio)), math.floor(220 * healthRatio + 35), 75)
+	object.HealthText.Text = string.format("HP %d / %d", math.floor(health + 0.5), math.floor(maxHealth + 0.5))
+
+	local armor, maxArmor = self:GetArmor(target, character, humanoid)
+	object.ArmorBack.Visible = self.ShowArmor
+	object.ArmorFill.Size = UDim2.fromScale(armor / maxArmor, 1)
+	object.ArmorText.Text = string.format("ARMOR %d / %d", math.floor(armor + 0.5), math.floor(maxArmor + 0.5))
+end
+
+function ESP:RefreshAll()
+	local localCharacter = player.Character
+	local localRoot = localCharacter and localCharacter:FindFirstChild("HumanoidRootPart")
+	local present = {}
+	for _, target in ipairs(Players:GetPlayers()) do
+		if target ~= player then
+			present[target] = true
+			self:RefreshPlayer(target, localRoot)
+		end
+	end
+	for target in pairs(self.Objects) do
+		if not present[target] then self:DestroyPlayer(target) end
+	end
+end
+
+function ESP:Start()
+	if self.Enabled and self.Connection then return end
+	self.Enabled = true
+	self.Accumulator = 0
+	self:RefreshAll()
+	if self.Connection then self.Connection:Disconnect() end
+	self.Connection = RunService.Heartbeat:Connect(function(delta)
+		self.Accumulator += delta
+		if self.Accumulator < self.UpdateInterval then return end
+		self.Accumulator = 0
+		self:RefreshAll()
+	end)
+end
+
+function ESP:Stop()
+	self.Enabled = false
+	if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
+	local targets = {}
+	for target in pairs(self.Objects) do targets[#targets + 1] = target end
+	for _, target in ipairs(targets) do self:DestroyPlayer(target) end
+end
+
+Farm.ESP = ESP
+getgenv().AraiESP = ESP
+
 local Window = Library:Window({ Name="A-RAI HUB | Candy Farm", Game="Some Town" })
 local Page = Window:CreatePage({ Name="Candy Farm" })
 local Controls = Page:CreateSection({ Name="Automation", Side=1, Collapsed=false })
 local Survival = Page:CreateSection({ Name="Auto Eat / Drink", Side=1, Collapsed=false })
 local Monitor = Page:CreateSection({ Name="Monitor", Side=2, Collapsed=false })
+local ESPPage = Window:CreatePage({ Name="ESP" })
+local ESPControls = ESPPage:CreateSection({ Name="ESP", Side=1, Collapsed=false })
+local ESPInfo = ESPPage:CreateSection({ Name="Player Information", Side=2, Collapsed=false })
 
 Controls:Toggle({ Name="Auto Farm Candy", Flag="AraiAutoCandy", Default=false,
 	Tooltip="Farm 5 ingredients, craft SeedCandy x5 and deposit it at REBEL.",
@@ -1189,6 +1409,23 @@ Survival:Slider({ Name="Drink Below", Flag="AraiThirstThreshold", Min=10, Max=90
 	Callback=function(value) Consume.ThirstThreshold=math.floor(value); updateConsumeUI() end })
 Survival:Label({ Name="Food: slot 6", Description=IS_MOBILE and "Mobile: taps hotbar slot 6" or "PC: presses top-row 6" })
 Survival:Label({ Name="Water: slot 7", Description=IS_MOBILE and "Mobile: taps hotbar slot 7" or "PC: presses top-row 7" })
+
+ESPControls:Toggle({ Name="Enable ESP", Flag="AraiESPEnabled", Default=false,
+	Callback=function(value) if value then ESP:Start() else ESP:Stop() end end })
+ESPControls:Toggle({ Name="Name", Flag="AraiESPName", Default=true,
+	Callback=function(value) ESP.ShowName=value; if ESP.Enabled then ESP:RefreshAll() end end })
+ESPControls:Toggle({ Name="Distance", Flag="AraiESPDistance", Default=true,
+	Callback=function(value) ESP.ShowDistance=value; if ESP.Enabled then ESP:RefreshAll() end end })
+ESPControls:Toggle({ Name="Health", Flag="AraiESPHealth", Default=true,
+	Callback=function(value) ESP.ShowHealth=value; if ESP.Enabled then ESP:RefreshAll() end end })
+ESPControls:Toggle({ Name="Armor", Flag="AraiESPArmor", Default=true,
+	Callback=function(value) ESP.ShowArmor=value; if ESP.Enabled then ESP:RefreshAll() end end })
+ESPControls:Slider({ Name="Max Distance", Flag="AraiESPMaxDistance", Min=100, Max=5000, Default=1000, Suffix="m", Compact=true,
+	Callback=function(value) ESP.MaxDistance=math.floor(value); if ESP.Enabled then ESP:RefreshAll() end end })
+ESPInfo:Label({ Name="Name + Distance", Description="White name and purple distance above each player" })
+ESPInfo:Label({ Name="Health", Description="Dynamic green/yellow/red health bar" })
+ESPInfo:Label({ Name="Armor", Description="Reads replicated Armor, Armour, Shield or Vest values" })
+ESPInfo:Label({ Name="Mobile supported", Description="All ESP controls use touch-ready toggles and sliders" })
 
 statusLabel = Monitor:Label("Status: Idle")
 Monitor:Label({ Name=IS_MOBILE and "Device: Mobile Touch" or "Device: PC Keyboard", Description="Input mode detected automatically" })
