@@ -2094,7 +2094,6 @@ local SurvivalMonitor = PlayerPage:CreateSection({ Name="＋ SURVIVAL STATUS", S
 
 local ESPPage = Window:CreatePage({ Name="◇ ESP" })
 local ESPControls = ESPPage:CreateSection({ Name="◇ ESP CONTROLS", Side=1, Collapsed=false })
-local ESPInfo = ESPPage:CreateSection({ Name="ℹ PLAYER INFORMATION", Side=2, Collapsed=false })
 
 local SettingsPage = Library:CreateSettingsPage(Window)
 SettingsPage.Name = "⚙ SETTINGS"
@@ -2173,26 +2172,21 @@ ESPControls:Slider({ Name="Max Distance", Flag="AraiESPMaxDistance", Min=100, Ma
 	Callback=function(value) ESP.MaxDistance=math.floor(value); if ESP.Enabled then ESP:RefreshAll() end end })
 ESPControls:Slider({ Name="Max Players", Flag="AraiESPMaxPlayers", Min=5, Max=30, Default=IS_MOBILE and 10 or 18, Suffix="", Compact=true,
 	Callback=function(value) ESP.MaxRendered=math.floor(value); if ESP.Enabled then ESP:RefreshAll() end end })
-ESPInfo:Label({ Name="Box ESP", Description="Purple 2D frame follows each streamed player model" })
-ESPInfo:Label({ Name="Health", Description="Vertical HP bar on the left side of the player" })
-ESPInfo:Label({ Name="Armor", Description="Vertical armor bar on the right side of the player" })
-ESPInfo:Label({ Name="Mobile supported", Description="All ESP controls use touch-ready toggles and sliders" })
-espStatusLabel = ESPInfo:Label({ Name="ESP: OFF", Description="Live target and rendered player count" })
+espStatusLabel = ESPControls:Label({ Name="ESP: OFF" })
 
 statusLabel = Monitor:Label("Status: Idle")
 spectateReadyLabel = SpectateInfo:Label({ Name="Players ready: 0 / 0", Description="Detected targets inside Spectate Range" })
-spectateStatusLabel = SpectateInfo:Label({ Name="Status: Idle", Description="Target camera state" })
-SpectateInfo:Label({ Name="External flow", Description="Select a ready target, save local camera, watch Humanoid/root, then restore automatically." })
+spectateStatusLabel = SpectateInfo:Label({ Name="Status: Idle" })
 
 gpsStatusLabel = GPSInfo:Label({ Name="GPS: Place a marker on the in-game map", Description="Reads PlayerGui/MapFrame/ViewportFrame" })
 gpsCoordinateLabel = GPSInfo:Label({ Name="Target: Not detected", Description="Converted Never Town world coordinates" })
 GPSInfo:Label({ Name="External calibration: 7.26191", Description="Uses UserMarker and MapMarker with the original 90-degree map conversion." })
 GPSInfo:Label({ Name="Mobile supported", Description="Open the game map, tap a marker, then use the GPS button." })
 
-consumeStatusLabel = SurvivalMonitor:Label({ Name="Consume: Disabled", Description="Auto Eat / Drink state" })
-hungerLabel = SurvivalMonitor:Label({ Name="Hunger: Unknown | eat below 30%", Description="PlayerGui/Status/Main/Status/Hunger/Bar" })
-thirstLabel = SurvivalMonitor:Label({ Name="Thirst: Unknown | drink below 30%", Description="PlayerGui/Status/Main/Status/Thirsty/Bar" })
-consumeProgressLabel = SurvivalMonitor:Label({ Name="Consume progress: Idle", Description="PlayerGui/UIList/Main/Progress" })
+consumeStatusLabel = SurvivalMonitor:Label({ Name="Consume: Disabled" })
+hungerLabel = SurvivalMonitor:Label({ Name="Hunger: Unknown | eat below 30%" })
+thirstLabel = SurvivalMonitor:Label({ Name="Thirst: Unknown | drink below 30%" })
+consumeProgressLabel = SurvivalMonitor:Label({ Name="Consume progress: Idle" })
 for _, crop in ipairs(CROPS) do
 	local label = Monitor:Label({ Name=crop[1]..": 0 / 100", Description="Candy ingredient" })
 	countLabels[crop[1]] = label
@@ -2200,7 +2194,6 @@ for _, crop in ipairs(CROPS) do
 end
 craftedLabel = Monitor:Label({ Name="SeedCandy crafted: 0", Description="Output produced this run" })
 attachIcon(craftedLabel, CANDY_ICONS.SeedCandy)
-Monitor:Label({ Name="External flow", Description="Cauliflower > Peach > Orange > Corn > Grape; 100 each, 30-second cooldown, craft SeedCandy x5, then deposit at REBEL." })
 
 DeviceSettings:Label({ Name=IS_MOBILE and "◉ Device: Mobile Touch" or "⌨ Device: PC Keyboard", Description="Input mode detected automatically" })
 DeviceSettings:Label({ Name=IS_MOBILE and "ESP motion: 30 FPS" or "ESP motion: 60 FPS", Description="Heavy player/cache reads run in a separate slow loop" })
