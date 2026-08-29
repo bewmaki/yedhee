@@ -1909,6 +1909,65 @@ local function make_draggable(frame, on_drag_end)
 	end)
 end
 
+local function make_window_header_draggable(handle, frame)
+	if not handle or not frame then return end
+	local dragging = false
+	local drag_start = nil
+	local start_position = nil
+	local active_touch = nil
+
+	local function stop_drag()
+		dragging = false
+		drag_start = nil
+		start_position = nil
+		active_touch = nil
+		Library.Dragging = false
+		Menu.Dragging = false
+		Menu.DragClosed = nil
+	end
+
+	Library:Connect(handle.InputBegan, function(input)
+		local input_type = input.UserInputType
+		if input_type ~= Enum.UserInputType.MouseButton1 and input_type ~= Enum.UserInputType.Touch then return end
+		if dragging then stop_drag() end
+		dragging = true
+		drag_start = Vector2New(input.Position.X, input.Position.Y)
+		start_position = frame.Position
+		active_touch = input_type == Enum.UserInputType.Touch and input or nil
+		Library.Dragging = true
+		Menu.Dragging = true
+		local content = Menu.CurrentContent
+		if content and type(content.Close) == "function" then
+			Menu.DragClosed = content
+			pcall(content.Close, content)
+		end
+	end)
+
+	Library:Connect(UserInputService.InputChanged, function(input)
+		if not dragging or not drag_start or not start_position then return end
+		if active_touch then
+			if input ~= active_touch then return end
+		elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then
+			return
+		end
+		local scale = get_drag_scale(frame)
+		local delta = (Vector2New(input.Position.X, input.Position.Y) - drag_start) / scale
+		frame.Position = UDim2New(
+			start_position.X.Scale,
+			start_position.X.Offset + delta.X,
+			start_position.Y.Scale,
+			start_position.Y.Offset + delta.Y
+		)
+	end)
+
+	Library:Connect(UserInputService.InputEnded, function(input)
+		if not dragging then return end
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input == active_touch then
+			stop_drag()
+		end
+	end)
+end
+
 function Library:SetWindowDragEnabled(enabled)
 	local detector = self.WindowDragDetector or Menu.WindowDragDetector
 	if not detector then return end
@@ -2727,8 +2786,20 @@ do
 			Theme = { BackgroundColor3 = "Background" },
 		})
 		corner(UI.MainFrame, 5)
-		UI.DragDetector = make_draggable(UI.MainFrame)
+		UI.DragDetector = nil
 		UI.SizeFrame = make_resizeable(UI.MainFrame, Vector2New(500, 350))
+		UI.DragHandle = Draw:Create("TextButton", {
+			Parent = UI.MainFrame,
+			Size = UDim2New(1, -45, 0, 30),
+			Position = UDim2New(0, 0, 0, 0),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Text = "",
+			AutoButtonColor = false,
+			Active = true,
+			ZIndex = 3,
+		})
+		make_window_header_draggable(UI.DragHandle, UI.MainFrame)
 
 		UI.Shadow = Draw:Create("ImageLabel", {
 			Parent = UI.MainFrame,
@@ -9253,26 +9324,8 @@ function Library:ApplyWindowInputState(bool)
 			return Enum.ContextActionResult.Pass
 		end
 
-		if input and (input.UserInputType == Enum.UserInputType.MouseButton2
-			or input.UserInputType == Enum.UserInputType.MouseButton3)
-			and self:IsPointerOverHubGui() then
-			return Enum.ContextActionResult.Pass
-		end
 		return Enum.ContextActionResult.Sink
-	end), false, 5000,
-		Enum.UserInputType.Gamepad1, Enum.UserInputType.MouseWheel,
-		Enum.UserInputType.MouseButton2, Enum.UserInputType.MouseButton3)
-
-	ContextActionService:BindActionAtPriority(self.InputBlockAction .. "_MOUSE", LPH_NO_VIRTUALIZE(function(_, state)
-		if state ~= Enum.UserInputState.Begin and state ~= Enum.UserInputState.Change then
-			return Enum.ContextActionResult.Pass
-		end
-		if not self.WindowOpenState or UserInputService:GetFocusedTextBox() then
-			return Enum.ContextActionResult.Pass
-		end
-		if self:IsPointerOverHubGui() then return Enum.ContextActionResult.Pass end
-		return Enum.ContextActionResult.Sink
-	end), false, 5000, Enum.UserInputType.MouseButton1, Enum.UserInputType.Touch)
+	end), false, 5000, Enum.UserInputType.Gamepad1, Enum.UserInputType.MouseWheel)
 end
 
 function Library:ResetPositions()
