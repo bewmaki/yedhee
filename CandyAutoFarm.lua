@@ -76,7 +76,7 @@ getgenv().AraiCandyFarm = Farm
 getgenv().SolixCandyFarm = Farm -- legacy alias for already-running copies
 for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = 0 end
 
-local statusLabel, craftedLabel
+local statusLabel, craftedLabel, espStatusLabel
 local countLabels = {}
 local consumeBusy = false
 
@@ -1183,8 +1183,8 @@ local ESP = {
 	UpdateInterval = IS_MOBILE and 0.16 or 0.1,
 }
 
-local ARMOR_NAMES = { "Armor", "Armour", "ArmorValue", "ArmourValue", "Shield", "Vest", "Protection" }
-local MAX_ARMOR_NAMES = { "MaxArmor", "MaxArmour", "ArmorMax", "ArmourMax", "MaxShield", "MaxVest", "MaxProtection" }
+local ARMOR_NAMES = { "AmmorHeal", "Armor", "Armour", "ArmorValue", "ArmourValue", "Shield", "Vest", "Protection" }
+local MAX_ARMOR_NAMES = { "AmmorMax", "AmmorHealMax", "MaxArmor", "MaxArmour", "ArmorMax", "ArmourMax", "MaxShield", "MaxVest", "MaxProtection" }
 
 local function readReplicatedNumber(containers, names)
 	for _, container in ipairs(containers) do
@@ -1193,11 +1193,22 @@ local function readReplicatedNumber(containers, names)
 				local ok, attribute = pcall(container.GetAttribute, container, name)
 				if ok and type(attribute) == "number" then return attribute end
 				local valueObject = container:FindFirstChild(name, true)
-				if valueObject and (valueObject:IsA("NumberValue") or valueObject:IsA("IntValue")) then
-					return valueObject.Value
+				if valueObject then
+					local valueOk, value = pcall(function() return valueObject.Value end)
+					if valueOk and type(value) == "number" then return value end
 				end
 			end
 		end
+	end
+	return nil
+end
+
+local function resolvePlayerCharacter(target)
+	local character = target and target.Character
+	if character and character.Parent then return character end
+	local workspaceCharacter = target and Workspace:FindFirstChild(target.Name)
+	if workspaceCharacter and workspaceCharacter:IsA("Model") and workspaceCharacter:FindFirstChildOfClass("Humanoid") then
+		return workspaceCharacter
 	end
 	return nil
 end
@@ -1256,7 +1267,7 @@ function ESP:CreatePlayer(target, adornee)
 	gui.Size = UDim2.fromOffset(170, 62)
 	gui.StudsOffsetWorldSpace = Vector3.new(0, 3.25, 0)
 	gui.Enabled = false
-	gui.Parent = player:WaitForChild("PlayerGui")
+	gui.Parent = adornee
 
 	local name = Instance.new("TextLabel")
 	name.BackgroundTransparency = 1
@@ -1291,6 +1302,16 @@ function ESP:CreatePlayer(target, adornee)
 end
 
 function ESP:GetArmor(target, character, humanoid)
+	local dumpedArmor = character and character:FindFirstChild("AmmorHeal", true)
+	if dumpedArmor then
+		local valueOk, value = pcall(function() return dumpedArmor.Value end)
+		if valueOk and type(value) == "number" then
+			local maxOk, maxValue = pcall(function() return dumpedArmor.MaxValue end)
+			if not maxOk or type(maxValue) ~= "number" or maxValue <= 0 then maxValue = 1 end
+			if maxValue <= 1 then return math.clamp(value, 0, maxValue) * 100, 100 end
+			return math.clamp(value, 0, maxValue), maxValue
+		end
+	end
 	local containers = { character, humanoid, target }
 	local armor = readReplicatedNumber(containers, ARMOR_NAMES) or 0
 	local maximum = readReplicatedNumber(containers, MAX_ARMOR_NAMES) or 100
@@ -1300,7 +1321,7 @@ end
 
 function ESP:RefreshPlayer(target, localRoot)
 	if target == player then return end
-	local character = target.Character
+	local character = resolvePlayerCharacter(target)
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	local root = character and (character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head"))
 	local adornee = character and (character:FindFirstChild("Head") or root)
@@ -1342,17 +1363,26 @@ function ESP:RefreshPlayer(target, localRoot)
 end
 
 function ESP:RefreshAll()
-	local localCharacter = player.Character
+	local localCharacter = resolvePlayerCharacter(player)
 	local localRoot = localCharacter and localCharacter:FindFirstChild("HumanoidRootPart")
 	local present = {}
+	local total = 0
 	for _, target in ipairs(Players:GetPlayers()) do
 		if target ~= player then
+			total += 1
 			present[target] = true
 			self:RefreshPlayer(target, localRoot)
 		end
 	end
 	for target in pairs(self.Objects) do
 		if not present[target] then self:DestroyPlayer(target) end
+	end
+	local rendered = 0
+	for _, object in pairs(self.Objects) do
+		if object.Gui and object.Gui.Enabled then rendered += 1 end
+	end
+	if espStatusLabel then
+		espStatusLabel:SetText(string.format("ESP: %s | players: %d | rendered: %d", self.Enabled and "ON" or "OFF", total, rendered))
 	end
 end
 
@@ -1376,6 +1406,7 @@ function ESP:Stop()
 	local targets = {}
 	for target in pairs(self.Objects) do targets[#targets + 1] = target end
 	for _, target in ipairs(targets) do self:DestroyPlayer(target) end
+	if espStatusLabel then espStatusLabel:SetText("ESP: OFF") end
 end
 
 Farm.ESP = ESP
@@ -1426,6 +1457,7 @@ ESPInfo:Label({ Name="Name + Distance", Description="White name and purple dista
 ESPInfo:Label({ Name="Health", Description="Dynamic green/yellow/red health bar" })
 ESPInfo:Label({ Name="Armor", Description="Reads replicated Armor, Armour, Shield or Vest values" })
 ESPInfo:Label({ Name="Mobile supported", Description="All ESP controls use touch-ready toggles and sliders" })
+espStatusLabel = ESPInfo:Label({ Name="ESP: OFF", Description="Live target and rendered player count" })
 
 statusLabel = Monitor:Label("Status: Idle")
 Monitor:Label({ Name=IS_MOBILE and "Device: Mobile Touch" or "Device: PC Keyboard", Description="Input mode detected automatically" })
