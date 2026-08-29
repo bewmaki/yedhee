@@ -2122,9 +2122,46 @@ local function guiCenter(gui)
 	return point
 end
 
+local function solve3x3(matrix, values)
+	local augmented = {}
+	for row = 1, 3 do
+		augmented[row] = {
+			matrix[row][1], matrix[row][2], matrix[row][3], values[row],
+		}
+	end
+
+	for column = 1, 3 do
+		local pivot = column
+		for row = column + 1, 3 do
+			if math.abs(augmented[row][column]) > math.abs(augmented[pivot][column]) then
+				pivot = row
+			end
+		end
+		if math.abs(augmented[pivot][column]) < 1e-8 then return nil end
+		augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
+
+		local divisor = augmented[column][column]
+		for index = column, 4 do augmented[column][index] /= divisor end
+		for row = 1, 3 do
+			if row ~= column then
+				local factor = augmented[row][column]
+				for index = column, 4 do
+					augmented[row][index] -= factor * augmented[column][index]
+				end
+			end
+		end
+	end
+	return Vector3.new(augmented[1][4], augmented[2][4], augmented[3][4])
+end
+
 function GPS:CalibrateMarker(mapObjects)
 	local configIcons, failure = self:GetConfigIcons()
 	if not configIcons then return nil, failure end
+	local viewportPosition = mapObjects.Viewport.AbsolutePosition
+	local viewportSize = mapObjects.Viewport.AbsoluteSize
+	if viewportSize.X <= 1 or viewportSize.Y <= 1 then
+		return nil, "Open the full map and wait a moment"
+	end
 
 	local samples = {}
 	for name, worldPosition in pairs(configIcons) do
@@ -2132,57 +2169,67 @@ function GPS:CalibrateMarker(mapObjects)
 		local screenPoint = guiCenter(icon)
 		if screenPoint then
 			samples[#samples + 1] = {
-				Screen = screenPoint,
+				Screen = Vector2.new(
+					(screenPoint.X - viewportPosition.X) / viewportSize.X,
+					(screenPoint.Y - viewportPosition.Y) / viewportSize.Y
+				),
 				World = Vector2.new(worldPosition.X, worldPosition.Z),
 			}
 		end
 	end
 	if #samples < 3 then return nil, "Open the map and wait a moment" end
 
-	-- Fit a 2D rotation/scale/translation from the dumped MapConfig landmarks
-	-- to their live GUI icons.  This keeps working after the player pans or
-	-- zooms the map and does not depend on the ViewportFrame camera internals.
-	local meanScreen, meanWorld = Vector2.zero, Vector2.zero
+	-- Fit a full affine transform.  The dumped GUI shows that Never Town
+	-- stretches the full-map viewport to each device's aspect ratio, so X and Y
+	-- cannot share the same scale as they did in the old GPS implementation.
+	local sumU2, sumUV, sumU = 0, 0, 0
+	local sumV2, sumV = 0, 0
+	local worldXU, worldXV, worldX = 0, 0, 0
+	local worldZU, worldZV, worldZ = 0, 0, 0
 	for _, sample in ipairs(samples) do
-		meanScreen += sample.Screen
-		meanWorld += sample.World
+		local u, v = sample.Screen.X, sample.Screen.Y
+		sumU2 += u * u
+		sumUV += u * v
+		sumU += u
+		sumV2 += v * v
+		sumV += v
+		worldXU += sample.World.X * u
+		worldXV += sample.World.X * v
+		worldX += sample.World.X
+		worldZU += sample.World.Y * u
+		worldZV += sample.World.Y * v
+		worldZ += sample.World.Y
 	end
-	meanScreen /= #samples
-	meanWorld /= #samples
-
-	local denominator, realPart, imaginaryPart = 0, 0, 0
-	for _, sample in ipairs(samples) do
-		local screenDelta = sample.Screen - meanScreen
-		local worldDelta = sample.World - meanWorld
-		denominator += screenDelta.X * screenDelta.X + screenDelta.Y * screenDelta.Y
-		realPart += worldDelta.X * screenDelta.X + worldDelta.Y * screenDelta.Y
-		imaginaryPart += worldDelta.Y * screenDelta.X - worldDelta.X * screenDelta.Y
+	local normal = {
+		{ sumU2, sumUV, sumU },
+		{ sumUV, sumV2, sumV },
+		{ sumU, sumV, #samples },
+	}
+	local coefficientsX = solve3x3(normal, { worldXU, worldXV, worldX })
+	local coefficientsZ = solve3x3(normal, { worldZU, worldZV, worldZ })
+	if not coefficientsX or not coefficientsZ then
+		return nil, "Open the full map and wait a moment"
 	end
-	if denominator < 25 then return nil, "Open the full map and wait a moment" end
-
-	local scaleReal = realPart / denominator
-	local scaleImaginary = imaginaryPart / denominator
-	local scale = math.sqrt(scaleReal * scaleReal + scaleImaginary * scaleImaginary)
-	if scale < 0.05 or scale > 100 then return nil, "Map calibration is not ready" end
 
 	local averageError = 0
 	for _, sample in ipairs(samples) do
-		local delta = sample.Screen - meanScreen
-		local predicted = meanWorld + Vector2.new(
-			scaleReal * delta.X - scaleImaginary * delta.Y,
-			scaleImaginary * delta.X + scaleReal * delta.Y
+		local u, v = sample.Screen.X, sample.Screen.Y
+		local predicted = Vector2.new(
+			coefficientsX.X * u + coefficientsX.Y * v + coefficientsX.Z,
+			coefficientsZ.X * u + coefficientsZ.Y * v + coefficientsZ.Z
 		)
 		averageError += (predicted - sample.World).Magnitude
 	end
 	averageError /= #samples
-	if averageError > 150 then return nil, "Map landmarks are still updating" end
+	if averageError > 200 then return nil, "Open the full map and wait one second" end
 
 	local markerCenter = guiCenter(mapObjects.MapMarker)
 	if not markerCenter then return nil, "GPS marker is not ready" end
-	local markerDelta = markerCenter - meanScreen
-	local target = meanWorld + Vector2.new(
-		scaleReal * markerDelta.X - scaleImaginary * markerDelta.Y,
-		scaleImaginary * markerDelta.X + scaleReal * markerDelta.Y
+	local markerU = (markerCenter.X - viewportPosition.X) / viewportSize.X
+	local markerV = (markerCenter.Y - viewportPosition.Y) / viewportSize.Y
+	local target = Vector2.new(
+		coefficientsX.X * markerU + coefficientsX.Y * markerV + coefficientsX.Z,
+		coefficientsZ.X * markerU + coefficientsZ.Y * markerV + coefficientsZ.Z
 	)
 	self.LastMarkerCenter = markerCenter
 	return target
