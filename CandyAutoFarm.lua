@@ -1185,6 +1185,10 @@ local ESP = {
 	NextProxyScan = {},
 	RootGui = nil,
 	NextStatusUpdate = 0,
+	WorldModels = {},
+	WorldAddedConnection = nil,
+	WorldRemovedConnection = nil,
+	ArmorAddedConnection = nil,
 }
 
 local ARMOR_NAMES = { "AmmorHeal", "Armor", "Armour", "ArmorValue", "ArmourValue", "Shield", "Vest", "Protection" }
@@ -1250,6 +1254,9 @@ end
 
 local function resolvePlayerCharacter(target)
 	if not target then return nil end
+	if typeof(target) == "Instance" and target:IsA("Model") then
+		return usableCharacter(target) and target or nil
+	end
 	-- Match Never Town external cache order: the live Workspace proxy wins over
 	-- Player.Character. At close range Player.Character may become a usable but
 	-- non-rendered streaming replica, which made the ESP switch away and vanish.
@@ -1383,6 +1390,16 @@ function ESP:GetArmor(target, character, humanoid)
 end
 
 local function projectESPPoint(camera, root, adornee, cameraDistance)
+	-- Close mode must run before W2S. Around Never Town's 25-stud streaming
+	-- boundary the old proxy can still return a positive but unusable projection.
+	if cameraDistance <= 30 then
+		local viewport = camera.ViewportSize
+		local closePoint = camera:WorldToViewportPoint(root.Position + Vector3.new(0, 2.4, 0))
+		if closePoint.Z > 0.05 and closePoint.X == closePoint.X and closePoint.Y == closePoint.Y then
+			return closePoint
+		end
+		return Vector3.new(viewport.X * 0.5, viewport.Y * 0.42, 0.05)
+	end
 	local candidates = {
 		adornee and (adornee.Position + Vector3.new(0, 0.75, 0)),
 		adornee and adornee.Position,
@@ -1399,10 +1416,6 @@ local function projectESPPoint(camera, root, adornee, cameraDistance)
 	-- When the camera clips into a nearby character every centre point may be
 	-- behind the near plane although the body is still visible. Keep its ESP
 	-- at screen centre instead of blinking off.
-	if cameraDistance <= 25 then
-		local viewport = camera.ViewportSize
-		return Vector3.new(viewport.X * 0.5, viewport.Y * 0.5, 0.05)
-	end
 	return nil
 end
 
@@ -1431,14 +1444,16 @@ function ESP:RefreshPlayer(target, localRoot)
 	-- Player.Character proxy at a remote coordinate during streaming.
 	local onRange = self.Enabled and camera ~= nil and screenPoint ~= nil and cameraDistance <= self.MaxDistance
 	object.Gui.Visible = onRange
-	if not onRange then return end
+	if not onRange then return character end
 	local viewport = camera.ViewportSize
 	local screenX = math.clamp(screenPoint.X, 85, math.max(85, viewport.X - 85))
 	local screenY = math.clamp(screenPoint.Y, 62, math.max(62, viewport.Y - 6))
 	object.Gui.Position = UDim2.fromOffset(screenX, screenY)
 
 	object.Name.Visible = self.ShowName
-	object.Name.Text = target.DisplayName ~= target.Name and (target.DisplayName .. "  @" .. target.Name) or target.Name
+	local isPlayerTarget = typeof(target) == "Instance" and target:IsA("Player")
+	local displayName = isPlayerTarget and target.DisplayName or target.Name
+	object.Name.Text = displayName ~= target.Name and (displayName .. "  @" .. target.Name) or target.Name
 	object.Distance.Visible = self.ShowDistance
 	local displayedDistance = distance < math.huge and distance or cameraDistance
 	object.Distance.Text = tostring(math.floor(displayedDistance + 0.5)) .. "m"
@@ -1455,6 +1470,14 @@ function ESP:RefreshPlayer(target, localRoot)
 	object.ArmorBack.Visible = self.ShowArmor
 	object.ArmorFill.Size = UDim2.fromScale(armor / maxArmor, 1)
 	object.ArmorText.Text = string.format("ARMOR %d%%", math.floor((armor / maxArmor) * 100 + 0.5))
+	return character
+end
+
+function ESP:TrackWorldModel(instance)
+	if instance and instance:IsA("Model") and instance.Parent == Workspace
+		and instance:FindFirstChild("AmmorHeal") then
+		self.WorldModels[instance] = true
+	end
 end
 
 function ESP:RefreshAll()
@@ -1463,12 +1486,27 @@ function ESP:RefreshAll()
 	local camera = Workspace.CurrentCamera
 	local localReference = localRoot or (camera and { Position = camera.CFrame.Position })
 	local present = {}
+	local usedCharacters = {}
 	local total = 0
 	for _, target in ipairs(Players:GetPlayers()) do
 		if target ~= player then
 			total += 1
 			present[target] = true
-			self:RefreshPlayer(target, localReference)
+			local character = self:RefreshPlayer(target, localReference)
+			if character then usedCharacters[character] = true end
+		end
+	end
+	-- Streaming fallback from the dump: live Never Town characters are direct
+	-- Workspace models with AmmorHeal. This catches a close-range replacement
+	-- even when Player.Character still references the parked proxy.
+	for model in pairs(self.WorldModels) do
+		if model.Parent ~= Workspace then
+			self.WorldModels[model] = nil
+		elseif model ~= localCharacter and model ~= player.Character
+			and model.Name ~= player.Name and not usedCharacters[model] then
+			total += 1
+			present[model] = true
+			self:RefreshPlayer(model, localReference)
 		end
 	end
 	for target in pairs(self.Objects) do
@@ -1489,6 +1527,27 @@ function ESP:Start()
 	self.Enabled = true
 	self.Accumulator = 0
 	self.NextStatusUpdate = 0
+	self.WorldModels = {}
+	for _, child in ipairs(Workspace:GetChildren()) do self:TrackWorldModel(child) end
+	if self.WorldAddedConnection then self.WorldAddedConnection:Disconnect() end
+	self.WorldAddedConnection = Workspace.ChildAdded:Connect(function(child)
+		task.delay(0.5, function()
+			if self.Enabled then self:TrackWorldModel(child) end
+		end)
+	end)
+	if self.WorldRemovedConnection then self.WorldRemovedConnection:Disconnect() end
+	self.WorldRemovedConnection = Workspace.ChildRemoved:Connect(function(child)
+		self.WorldModels[child] = nil
+	end)
+	if self.ArmorAddedConnection then self.ArmorAddedConnection:Disconnect() end
+	self.ArmorAddedConnection = Workspace.DescendantAdded:Connect(function(descendant)
+		if descendant.Name == "AmmorHeal" then
+			local model = descendant.Parent
+			if model and model:IsA("Model") and model.Parent == Workspace then
+				self.WorldModels[model] = true
+			end
+		end
+	end)
 	self:RefreshAll()
 	if self.Connection then self.Connection:Disconnect() end
 	self.Connection = RunService.Heartbeat:Connect(function(delta)
@@ -1502,12 +1561,16 @@ end
 function ESP:Stop()
 	self.Enabled = false
 	if self.Connection then self.Connection:Disconnect(); self.Connection = nil end
+	if self.WorldAddedConnection then self.WorldAddedConnection:Disconnect(); self.WorldAddedConnection = nil end
+	if self.WorldRemovedConnection then self.WorldRemovedConnection:Disconnect(); self.WorldRemovedConnection = nil end
+	if self.ArmorAddedConnection then self.ArmorAddedConnection:Disconnect(); self.ArmorAddedConnection = nil end
 	local targets = {}
 	for target in pairs(self.Objects) do targets[#targets + 1] = target end
 	for _, target in ipairs(targets) do self:DestroyPlayer(target) end
 	if self.RootGui then pcall(self.RootGui.Destroy, self.RootGui); self.RootGui = nil end
 	self.ProxyCharacters = {}
 	self.NextProxyScan = {}
+	self.WorldModels = {}
 	if espStatusLabel then espStatusLabel:SetText("ESP: OFF") end
 end
 
