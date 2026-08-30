@@ -151,6 +151,7 @@ local spectateDropdown
 local invisibleToggle
 local countLabels = {}
 local consumeBusy = false
+local consumeRevision = 0
 
 local function attachIcon(label, url)
 	if not label or not label.UI or not label.UI.Framework then return end
@@ -220,6 +221,16 @@ end
 local function near(position)
 	local _, root = characterRoot()
 	return root and (root.Position - position).Magnitude <= 18
+end
+
+local function nativeFarmMatches(cropName)
+	local character = player.Character
+	local auto = character and character:FindFirstChild("Auto")
+	if not auto or not auto:IsA("BoolValue") or not auto.Value then return false end
+	local workspaceValue = auto:FindFirstChild("WorkspaceValue")
+	return workspaceValue ~= nil
+		and workspaceValue:IsA("StringValue")
+		and workspaceValue.Value == cropName
 end
 
 local function warp(position, id)
@@ -634,10 +645,42 @@ local function farmCrop(crop, id)
 		if not interact(crop, id) then return false end
 		local started, hudSeen, missingSince = os.clock(), false, nil
 		local lastCurrent, lastMaximum = -1, -1
+		local lastProgress = os.clock()
+		local observedConsumeRevision = consumeRevision
+		local resumeAttempts = 0
 		while active(id) and os.clock()-started < Farm.Settings.Timeout do
+			if consumeBusy then
+				local pausedAt = os.clock()
+				repeat task.wait(0.1) until not consumeBusy or not active(id)
+				if not active(id) then return false end
+				local pausedFor = os.clock() - pausedAt
+				started += pausedFor
+				lastProgress = os.clock()
+			end
+
+			local consumed = observedConsumeRevision ~= consumeRevision
+			if consumed then observedConsumeRevision = consumeRevision end
+			local sessionMissing = not nativeFarmMatches(crop[1])
+			if sessionMissing and (consumed or os.clock()-lastProgress >= 12) then
+				resumeAttempts += 1
+				if resumeAttempts > 3 then break end
+				stage(3, crop[1], "Resuming after consume "..resumeAttempts.."/3")
+				if not near(crop[2]) and not warp(crop[2], id) then return false end
+				if not interact(crop, id) then break end
+				local resumed = waitFor(function()
+					return nativeFarmMatches(crop[1])
+				end, 4, id)
+				lastProgress = os.clock()
+				if not resumed and resumeAttempts >= 3 then break end
+			end
+
 			local current, maximum = hudCount(crop[1])
 			if current then
 				hudSeen, missingSince = true, nil
+				if current > lastCurrent then
+					lastProgress = os.clock()
+					resumeAttempts = 0
+				end
 				lastCurrent, lastMaximum = current, maximum or 100
 				Farm.Counts[crop[1]] = current; updateStatus()
 				if current >= 100 and (maximum or 100) >= 100 then return true end
@@ -1206,7 +1249,9 @@ local function consumeSlot(slot, statusName, id)
 
 	consumeBusy = true
 	updateConsumeUI(statusName == "Hunger" and "Pressing top-row 6" or "Pressing top-row 7")
-	if not pressSlot(slot) or not waitConsume(0.5, id) then
+	local pressed = pressSlot(slot)
+	if pressed then consumeRevision += 1 end
+	if not pressed or not waitConsume(0.5, id) then
 		consumeBusy = false
 		return false, false
 	end
