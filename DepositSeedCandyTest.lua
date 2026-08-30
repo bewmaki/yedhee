@@ -220,35 +220,48 @@ end
 local function itemTargets(panel)
     local targets = {}
     local seen = {}
-    for _, object in ipairs(panel:GetDescendants()) do
-        local matches = object.Name == "SeedCandy"
-        if (object:IsA("TextLabel") or object:IsA("TextButton")) and object.Text == "SeedCandy" then
-            matches = true
-        end
-        if matches then
-            local node = object
-            local fallback = object:IsA("GuiObject") and object or nil
-            while node and node ~= panel do
-                if node:IsA("GuiButton") and visible(node) then
-                    fallback = node
-                    break
-                end
-                if node:IsA("GuiObject") and visible(node) then
-                    fallback = node
-                end
-                node = node.Parent
-            end
-            if fallback and not seen[fallback] then
-                seen[fallback] = true
-                targets[#targets + 1] = fallback
-            end
+    local card = exact(panel, "SeedCandy")
+    if not card then
+        return targets
+    end
+
+    while card and card ~= panel and card.Name ~= "SeedCandy" do
+        card = card.Parent
+    end
+    if not card or card == panel or not card:IsA("GuiObject") or not visible(card) then
+        return targets
+    end
+
+    local function add(object)
+        if object and object:IsA("GuiObject") and visible(object) and not seen[object] then
+            seen[object] = true
+            targets[#targets + 1] = object
         end
     end
+
+    for _, object in ipairs(card:GetDescendants()) do
+        if object:IsA("GuiButton") then
+            add(object)
+        end
+    end
+    add(card)
+    for _, object in ipairs(card:GetDescendants()) do
+        if object:IsA("ImageLabel") or object:IsA("TextLabel") then
+            add(object)
+        end
+    end
+
     table.sort(targets, function(left, right)
-        local leftButton = left:IsA("GuiButton") and 0 or 1
-        local rightButton = right:IsA("GuiButton") and 0 or 1
-        if leftButton ~= rightButton then
-            return leftButton < rightButton
+        local function priority(object)
+            if object:IsA("GuiButton") then return 0 end
+            if object == card then return 1 end
+            if object:IsA("ImageLabel") then return 2 end
+            return 3
+        end
+        local leftPriority = priority(left)
+        local rightPriority = priority(right)
+        if leftPriority ~= rightPriority then
+            return leftPriority < rightPriority
         end
         return left.AbsoluteSize.X * left.AbsoluteSize.Y < right.AbsoluteSize.X * right.AbsoluteSize.Y
     end)
@@ -257,16 +270,33 @@ end
 
 local function snapshot(panel, label)
     log("SNAPSHOT " .. label)
-    for _, object in ipairs(panel:GetDescendants()) do
+    local card = exact(panel, "SeedCandy")
+    if not card then
+        log("SeedCandy card not found")
+        return
+    end
+    while card and card ~= panel and card.Name ~= "SeedCandy" do
+        card = card.Parent
+    end
+    if not card or card == panel then
+        log("SeedCandy card boundary not found")
+        return
+    end
+
+    local objects = {card}
+    for _, object in ipairs(card:GetDescendants()) do
+        objects[#objects + 1] = object
+    end
+    for _, object in ipairs(objects) do
         local text = ""
         if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
             text = object.Text
         end
-        if object.Name:lower():find("seed", 1, true) or text:lower():find("seedcandy", 1, true) then
-            local position = object:IsA("GuiObject") and tostring(object.AbsolutePosition) or "-"
-            local size = object:IsA("GuiObject") and tostring(object.AbsoluteSize) or "-"
-            log(table.concat({object:GetFullName(), object.ClassName, "Text=" .. text, "Pos=" .. position, "Size=" .. size}, " | "))
-        end
+        local position = object:IsA("GuiObject") and tostring(object.AbsolutePosition) or "-"
+        local size = object:IsA("GuiObject") and tostring(object.AbsoluteSize) or "-"
+        local shown = object:IsA("GuiObject") and tostring(visible(object)) or "-"
+        local active = object:IsA("GuiButton") and tostring(object.Active) or "-"
+        log(table.concat({object:GetFullName(), object.ClassName, "Text=" .. text, "Visible=" .. shown, "Active=" .. active, "Pos=" .. position, "Size=" .. size}, " | "))
     end
 end
 
@@ -347,15 +377,10 @@ local function run()
             break
         end
 
-        local target = targets[1]
         local beforeInventory, inventoryKnown = itemCount(inventory, "SeedCandy")
         local beforeSafe, safeKnown = itemCount(safe, "SeedCandy")
-        log(string.format("Transfer %d target=%s class=%s inv=%s safe=%s", transfer, target:GetFullName(), target.ClassName, tostring(beforeInventory), tostring(beforeSafe)))
 
         local function transferred()
-            if not target.Parent or not target:IsDescendantOf(inventory) then
-                return true
-            end
             if exact(inventory, "SeedCandy") == nil then
                 return true
             end
@@ -370,24 +395,30 @@ local function run()
             return false
         end
 
-        local methods = {
-            {"pointer", function() pointerClick(target, false) end},
-            {"direct", function() directActivate(target) end},
-            {"double", function() pointerClick(target, true) end},
-            {"virtual-user", function()
-                local point = target.AbsolutePosition + target.AbsoluteSize / 2
-                VirtualUser:ClickButton1(point, Workspace.CurrentCamera and Workspace.CurrentCamera.CFrame or CFrame.new())
-            end},
-        }
-
         local moved = false
-        for _, method in ipairs(methods) do
-            log("Trying " .. method[1])
-            pcall(method[2])
-            if waitFor(transferred, 1.2) then
-                moved = true
-                movedAny = true
-                log("Confirmed by " .. method[1])
+        for targetIndex, target in ipairs(targets) do
+            log(string.format("Transfer %d target[%d]=%s class=%s inv=%s safe=%s", transfer, targetIndex, target:GetFullName(), target.ClassName, tostring(beforeInventory), tostring(beforeSafe)))
+            local methods = {
+                {"pointer", function() pointerClick(target, false) end},
+                {"direct", function() directActivate(target) end},
+                {"double", function() pointerClick(target, true) end},
+                {"virtual-user", function()
+                    local point = target.AbsolutePosition + target.AbsoluteSize / 2
+                    VirtualUser:ClickButton1(point, Workspace.CurrentCamera and Workspace.CurrentCamera.CFrame or CFrame.new())
+                end},
+            }
+
+            for _, method in ipairs(methods) do
+                log("Trying " .. method[1] .. " on target[" .. tostring(targetIndex) .. "]")
+                pcall(method[2])
+                if waitFor(transferred, 1.2) then
+                    moved = true
+                    movedAny = true
+                    log("Confirmed by " .. method[1] .. " on target[" .. tostring(targetIndex) .. "]")
+                    break
+                end
+            end
+            if moved then
                 break
             end
         end
