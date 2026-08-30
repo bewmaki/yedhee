@@ -139,7 +139,7 @@ local STAGES = { [0]="Idle", "Opening locker", "Scanning inventory", "Farming", 
 local Farm = {
 	Enabled = false, RunId = 0, Stage = 0, NextCrop = nil, Cooldown = 0, Crafted = 0,
 	Counts = {},
-	Settings = { Cooldown = 30, Timeout = 720, YOffset = 0, MoveCamera = true },
+	Settings = { Cooldown = 30, Timeout = 720, YOffset = 0 },
 }
 getgenv().AraiCandyFarm = Farm
 getgenv().SolixCandyFarm = Farm -- legacy alias for already-running copies
@@ -387,7 +387,7 @@ end
 local function interact(point, id)
 	while consumeBusy and active(id) do task.wait(0.1) end
 	if not active(id) then return false end
-	if Farm.Settings.MoveCamera and Workspace.CurrentCamera then
+	if Workspace.CurrentCamera then
 		Workspace.CurrentCamera.CFrame = CFrame.lookAt(point[3], point[3] + point[4])
 	end
 	local prompt = waitFor(function() return findPrompt(point) end, 1.5, id)
@@ -2670,8 +2670,6 @@ GPS.Page = PlayerPage
 
 Controls:Toggle({ Name="Auto Farm Candy", Flag="AraiAutoCandy", Default=false,
 	Callback=function(value) if value then Farm:Start() else Farm:Stop() end end })
-Controls:Toggle({ Name="Move Camera To Prompt", Flag="AraiCandyCamera", Default=true,
-	Callback=function(value) Farm.Settings.MoveCamera=value end })
 Controls:Slider({ Name="Server Cooldown", Flag="AraiCandyCooldown", Min=20, Max=60, Default=30, Suffix="s", Compact=true,
 	Callback=function(value) Farm.Settings.Cooldown=math.floor(value) end })
 Controls:Slider({ Name="Teleport Y Offset", Flag="AraiCandyYOffset", Min=0, Max=8, Default=0, Suffix=" studs", Compact=true,
@@ -2757,7 +2755,7 @@ Survival:Slider({ Name="Drink Below", Flag="AraiThirstThreshold", Min=10, Max=90
 Survival:Label({ Name="Food Slot: 6" })
 Survival:Label({ Name="Water Slot: 7" })
 
-ESPControls:Toggle({ Name="Enable ESP", Flag="AraiESPEnabled", Default=false,
+local espToggle = ESPControls:Toggle({ Name="Enable ESP", Flag="AraiESPEnabled", Default=true,
 	Callback=function(value) if value then ESP:Start() else ESP:Stop() end end })
 ESPControls:Toggle({ Name="Name", Flag="AraiESPName", Default=true,
 	Callback=function(value) ESP.ShowName=value; if ESP.Enabled then ESP:RefreshAll() end end })
@@ -2806,6 +2804,7 @@ Spectate:StartMonitor()
 Spectate:RefreshPlayers()
 GPS:Start()
 if antiAFKToggle.Value then AntiAFK:Start() end
+if espToggle.Value then ESP:Start() end
 
 Window:SetOpen(true)
 updateStatus()
