@@ -1352,11 +1352,11 @@ end
 
 local ESP = {
 	Enabled = false,
-	ShowName = true,
-	ShowDistance = true,
-	ShowHealth = true,
-	ShowArmor = true,
-	ShowBox = true,
+	ShowName = false,
+	ShowDistance = false,
+	ShowHealth = false,
+	ShowArmor = false,
+	ShowBox = false,
 	MaxDistance = 1000,
 	MaxRendered = IS_MOBILE and 10 or 18,
 	Objects = {},
@@ -3053,17 +3053,17 @@ Survival:Slider({ Name="Drink Below", Flag="AraiThirstThreshold", Min=10, Max=90
 Survival:Label({ Name="Food Slot: 6" })
 Survival:Label({ Name="Water Slot: 7" })
 
-local espToggle = ESPControls:Toggle({ Name="Enable ESP", Flag="AraiESPEnabled", Default=true,
+local espToggle = ESPControls:Toggle({ Name="Enable ESP", Flag="AraiESPEnabled", Default=false,
 	Callback=function(value) if value then ESP:Start() else ESP:Stop() end end })
-ESPControls:Toggle({ Name="Name", Flag="AraiESPName", Default=true,
+ESPControls:Toggle({ Name="Name", Flag="AraiESPName", Default=false,
 	Callback=function(value) ESP.ShowName=value; if ESP.Enabled then ESP:RefreshAll() end end })
-ESPControls:Toggle({ Name="Distance", Flag="AraiESPDistance", Default=true,
+ESPControls:Toggle({ Name="Distance", Flag="AraiESPDistance", Default=false,
 	Callback=function(value) ESP.ShowDistance=value; if ESP.Enabled then ESP:RefreshAll() end end })
-ESPControls:Toggle({ Name="Box", Flag="AraiESPBox", Default=true,
+ESPControls:Toggle({ Name="Box", Flag="AraiESPBox", Default=false,
 	Callback=function(value) ESP.ShowBox=value; if ESP.Enabled then ESP:RefreshAll() end end })
-ESPControls:Toggle({ Name="Health", Flag="AraiESPHealth", Default=true,
+ESPControls:Toggle({ Name="Health", Flag="AraiESPHealth", Default=false,
 	Callback=function(value) ESP.ShowHealth=value; if ESP.Enabled then ESP:RefreshAll() end end })
-ESPControls:Toggle({ Name="Armor", Flag="AraiESPArmor", Default=true,
+ESPControls:Toggle({ Name="Armor", Flag="AraiESPArmor", Default=false,
 	Callback=function(value) ESP.ShowArmor=value; if ESP.Enabled then ESP:RefreshAll() end end })
 ESPControls:Slider({ Name="Max Distance", Flag="AraiESPMaxDistance", Min=100, Max=5000, Default=1000, Suffix="m", Compact=true,
 	Callback=function(value) ESP.MaxDistance=math.floor(value); if ESP.Enabled then ESP:RefreshAll() end end })
