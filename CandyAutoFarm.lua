@@ -880,75 +880,65 @@ local function requirementsReady(bg)
 end
 
 local function craftSeedCandy(id)
-	stage(5, nil, "Opening Craft UI")
-	if not near(CRAFT[2]) and not warp(CRAFT[2], id) then return false end
-	local bg
-	for _ = 1, 3 do
-		if not interact(CRAFT, id) then return false end
-		bg = waitFor(craftUI, 5, id)
-		if bg then break end
-	end
-	if not bg then return false end
-	local select = bg:FindFirstChild("Select")
-	local tableButton = select and select:FindFirstChild("ButtonTable")
-	if tableButton then
-		activateGuiDirect(tableButton); waitActive(0.35, id)
-		local category = exact(select, "Category_CategoryCandy")
-		if category then activateGuiDirect(category); waitActive(0.5, id) end
-	end
-	local list = bg:FindFirstChild("ITlist")
-	local listFrame = list and list:FindFirstChild("Frame")
-	local card = seedCandyCard(listFrame)
-	if not card then closeGui(bg); return false end
-	stage(5, nil, "Selecting SeedCandy")
-	-- Always activate the exact dumped card. CraftText can already say
-	-- SeedCandy, so verify the two selection frames instead of that text.
-	if not activateAndConfirm(card, function()
-		return craftCardSelected(card)
-	end, id, 0.65) then
-		closeGui(bg); return false
-	end
-	if selectedCraftName(bg) ~= "SeedCandy" then closeGui(bg); return false end
-	local amount, quantityContainer = findQuantityLabel(bg)
-	if not amount then closeGui(bg); return false end
-	for _ = 1, 8 do
-		local quantity = tonumber(amount.Text)
-		if quantity == 5 then break end
-		stage(5, nil, "Quantity " .. tostring(quantity or "?") .. " -> 5")
-		local adjust = findQuantityButton(bg, amount, quantityContainer, (quantity or 0) < 5)
-		if not adjust then closeGui(bg); return false end
-		if not activateAndConfirm(adjust, function()
-			local refreshed = findQuantityLabel(bg)
-			return refreshed and tonumber(refreshed.Text) ~= quantity
-		end, id) then
-			closeGui(bg); return false
+	stage(5, nil, "Background craft SeedCandy x5")
+	local itemFolder = player:FindFirstChild("Item")
+	local seedCandy = itemFolder and itemFolder:FindFirstChild("SeedCandy")
+	local remoteRoot = ReplicatedStorage:FindFirstChild("RemoteEvent_Solf")
+	local remoteA = remoteRoot and remoteRoot:FindFirstChild("RemoteEventA")
+	local craftsFolder = remoteA and remoteA:FindFirstChild("CraftsFolder")
+	local crafttable = craftsFolder and craftsFolder:FindFirstChild("Crafttable")
+
+	if not itemFolder or not seedCandy or not seedCandy:IsA("ValueBase") then return false end
+	if not crafttable or not crafttable:IsA("RemoteEvent") then return false end
+
+	local responseSerial = 0
+	local responseStatus
+	local connection = crafttable.OnClientEvent:Connect(function(_, status)
+		if status == "Success" or status == "Fail" then
+			responseSerial += 1
+			responseStatus = status
 		end
-		amount, quantityContainer = findQuantityLabel(bg)
-		if not amount then closeGui(bg); return false end
+	end)
+
+	local crafted = 0
+	for attempt = 1, 5 do
+		if not active(id) then break end
+		local beforeSeed = tonumber(seedCandy.Value) or 0
+		local serialBefore = responseSerial
+		responseStatus = nil
+		stage(5, nil, "Background craft " .. attempt .. "/5")
+
+		local ok = pcall(function()
+			crafttable:FireServer("SeedCandy", "Recipe1", "1", false)
+		end)
+		if not ok then break end
+
+		local result = waitFor(function()
+			if (tonumber(seedCandy.Value) or 0) > beforeSeed then return "Success" end
+			if responseSerial > serialBefore then return responseStatus end
+		end, 5, id)
+		if result ~= "Success" then break end
+
+		if (tonumber(seedCandy.Value) or 0) <= beforeSeed then
+			waitFor(function()
+				return (tonumber(seedCandy.Value) or 0) > beforeSeed
+			end, 2, id)
+		end
+		if (tonumber(seedCandy.Value) or 0) <= beforeSeed then break end
+
+		crafted += 1
 	end
-	if tonumber(amount.Text) ~= 5 then closeGui(bg); return false end
-	if not waitFor(function() return requirementsReady(bg) end, 2, id) then closeGui(bg); return false end
-	local main = bg:FindFirstChild("Main")
-	local craftText = visibleText(bg, "CRAFT")
-	local craftButton = (main and main:FindFirstChild("Craft")) or clickableFrom(craftText, bg)
-	stage(5, nil, "Clicking CRAFT")
-	local loading = main and main:FindFirstChild("Loading")
-	local loadingBefore = loading and loading.Text
-	if not craftButton or not activateAndConfirm(craftButton, function()
-		return (loading and loading.Text ~= loadingBefore)
-			or not visible(craftButton)
-			or not craftButton.Active
-	end, id, 1.5) then
-		closeGui(bg); return false
+
+	connection:Disconnect()
+	Farm.Crafted += crafted
+	for _, crop in ipairs(CROPS) do
+		local value = itemFolder:FindFirstChild(crop[1])
+		if value and value:IsA("ValueBase") then
+			Farm.Counts[crop[1]] = tonumber(value.Value) or Farm.Counts[crop[1]]
+		end
 	end
-	if not waitActive(12, id) then closeGui(bg); return false end
-	if not closeGui(bg) then
-		task.wait(0.25)
-		closeGui(bg)
-	end
-	Farm.Crafted += 5
-	for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = math.max(0, Farm.Counts[crop[1]]-100) end
-	updateStatus(); return true
+	updateStatus()
+	return crafted == 5 and active(id)
 end
 
 local function lockerPanels()
@@ -973,42 +963,39 @@ end
 
 local function deposit(id)
 	stage(6)
-	if not near(REBEL[2]) and not warp(REBEL[2], id) then return false end
-	local panels
-	for _ = 1, 3 do
-		if not interact(REBEL, id) then return false end
-		panels = waitFor(lockerPanels, 4, id)
-		if panels then break end
-	end
-	if not panels then return false end
-	local ui, inventory, safe = panels[1], panels[2], panels[3]
-	local beforeInventory, inventoryCountKnown = itemCount(inventory, "SeedCandy")
-	local beforeSafe, safeCountKnown = itemCount(safe, "SeedCandy")
-	local function transferred()
-		if exact(inventory, "SeedCandy") == nil then return true end
-		local inventoryNow, inventoryKnownNow = itemCount(inventory, "SeedCandy")
-		if inventoryCountKnown and inventoryKnownNow and inventoryNow < beforeInventory then return true end
-		local safeNow, safeKnownNow = itemCount(safe, "SeedCandy")
-		return safeCountKnown and safeKnownNow and safeNow > beforeSafe
+	local itemFolder = player:FindFirstChild("Item")
+	local safeFolder = player:FindFirstChild("Safe")
+	local inventorySeed = itemFolder and itemFolder:FindFirstChild("SeedCandy")
+	local safeSeed = safeFolder and safeFolder:FindFirstChild("SeedCandy")
+	local gameModules = ReplicatedStorage:FindFirstChild("Game_Modules")
+	local safeRemotes = gameModules and gameModules:FindFirstChild("RemoteEventSafe")
+	local depositItem = safeRemotes and safeRemotes:FindFirstChild("DepositItem")
+
+	if not inventorySeed or not inventorySeed:IsA("ValueBase") then return false end
+	if not safeSeed or not safeSeed:IsA("ValueBase") then return false end
+	if not depositItem or not depositItem:IsA("RemoteEvent") then return false end
+	if tonumber(inventorySeed.Value) <= 0 then return active(id) end
+
+	for attempt = 1, 3 do
+		if not active(id) then return false end
+		local amount = tonumber(inventorySeed.Value) or 0
+		if amount <= 0 then return true end
+
+		stage(6, nil, "Background deposit (" .. attempt .. "/3)")
+		local beforeInventory = amount
+		local beforeSafe = tonumber(safeSeed.Value) or 0
+		local ok = pcall(function()
+			depositItem:FireServer("SeedCandy", amount)
+		end)
+		if not ok then return false end
+
+		waitFor(function()
+			return (tonumber(inventorySeed.Value) or 0) < beforeInventory
+				or (tonumber(safeSeed.Value) or 0) > beforeSafe
+		end, 4, id)
 	end
 
-	local moved = false
-	for attempt = 1, 3 do
-		if not active(id) then break end
-		local seed = lockerItemTarget(inventory, "SeedCandy")
-		if not seed then
-			moved = transferred()
-			break
-		end
-		stage(6, nil, "Depositing SeedCandy ("..attempt.."/3)")
-		if clickAndConfirm(seed, transferred, id, 1.15) then
-			moved = true
-			break
-		end
-		task.wait(0.2)
-	end
-	if not moved then moved = transferred() end
-	closeGui(ui); return moved and active(id)
+	return active(id) and (tonumber(inventorySeed.Value) or 0) <= 0
 end
 
 local function cycle(id)
