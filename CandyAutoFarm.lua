@@ -396,24 +396,38 @@ end
 local function interact(point, id)
 	while consumeBusy and active(id) do task.wait(0.1) end
 	if not active(id) then return false end
-	if Workspace.CurrentCamera then
-		Workspace.CurrentCamera.CFrame = CFrame.lookAt(point[3], point[3] + point[4])
-	end
 	local prompt = waitFor(function() return findPrompt(point) end, 1.5, id)
-	if prompt and type(fireproximityprompt) == "function" and pcall(fireproximityprompt, prompt, prompt.HoldDuration) then
-		return waitActive(0.5, id)
+	if not prompt then return false end
+
+	local cropName = point[1]
+	local function confirmed()
+		return nativeFarmMatches(cropName)
 	end
-	if prompt and IS_MOBILE then
-		local began = pcall(function() prompt:InputHoldBegin() end)
-		if began then
-			if not waitActive(math.max(0.1, prompt.HoldDuration), id) then return false end
-			pcall(function() prompt:InputHoldEnd() end)
-			return waitActive(0.5, id)
+	if confirmed() then return true end
+
+	-- Keep crop activation inside this Roblox client. VirtualInput E and camera
+	-- movement require foreground focus and interfere with multi-instance farms.
+	if type(fireproximityprompt) == "function" then
+		for _, arguments in ipairs({
+			{ prompt, 0, true },
+			{ prompt, prompt.HoldDuration },
+		}) do
+			pcall(function()
+				fireproximityprompt(table.unpack(arguments))
+			end)
+			if waitFor(confirmed, 2.5, id) then return true end
 		end
-		return false
 	end
-	key(Enum.KeyCode.E, 1.1)
-	return waitActive(0.5, id)
+
+	-- Some executor builds omit fireproximityprompt but still expose the
+	-- engine-level hold methods. They do not send an OS keyboard event.
+	local began = pcall(function() prompt:InputHoldBegin() end)
+	if began then
+		if not waitActive(math.max(0.1, prompt.HoldDuration), id) then return false end
+		pcall(function() prompt:InputHoldEnd() end)
+		if waitFor(confirmed, 2.5, id) then return true end
+	end
+	return false
 end
 
 local function exact(root, name)
