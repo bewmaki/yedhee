@@ -145,22 +145,54 @@ local REBEL = { nil, Vector3.new(4188.2, 14.9, 4644.4), Vector3.new(4172.4, 25.7
 local CRAFT = { nil, Vector3.new(-329.9, 2.2, 485.6), Vector3.new(-321.0, 7.5, 484.8), Vector3.new(-0.911, -0.403, 0.085) }
 local STAGES = { [0]="Idle", "Opening locker", "Scanning inventory", "Farming", "Farm cooldown", "Crafting SeedCandy x5", "Depositing SeedCandy", "Retrying" }
 
+local ORCHARD_AREA = {
+	Vector2.new(978.018, 1425.396),
+	Vector2.new(685.247, 1259.390),
+	Vector2.new(622.570, 950.480),
+	Vector2.new(786.127, 829.267),
+	Vector2.new(1056.418, 911.187),
+}
+
 local Farm = {
 	Enabled = false, RunId = 0, Stage = 0, NextCrop = nil, Cooldown = 0, Crafted = 0,
+	Mode = nil,
 	Counts = {},
 	Settings = { Cooldown = 30, Timeout = 720, YOffset = 0 },
 }
+local PlantLoop = {
+	Enabled = false,
+	Busy = false,
+	NeedsService = false,
+	NeedsSeed = false,
+	Status = "Idle",
+	TreeCount = 0,
+	LowestWater = 0,
+	RoundCenter = nil,
+	NextServiceAttempt = 0,
+	Settings = {
+		TreeCount = 5,
+		WaterThreshold = 45,
+		WaterTarget = 90,
+		MonitorInterval = 2,
+	},
+}
 getgenv().AraiCandyFarm = Farm
 getgenv().SolixCandyFarm = Farm -- legacy alias for already-running copies
+getgenv().AutoCandyFarmPlantLoop = PlantLoop
+Farm.PlantLoop = PlantLoop
 for _, crop in ipairs(CROPS) do Farm.Counts[crop[1]] = 0 end
 
 local statusLabel, craftedLabel, espStatusLabel, spectateStatusLabel, spectateReadyLabel
 local gpsStatusLabel, gpsCoordinateLabel
 local spectateDropdown
 local invisibleToggle
+local normalFarmToggle, plantLoopToggle, consumeToggle
+local plantLoopStatusLabel, plantLoopTreeLabel, plantLoopWaterLabel
 local countLabels = {}
 local consumeBusy = false
 local consumeRevision = 0
+local ensureAutoConsume
+local servicePlantLoop
 
 local function attachIcon(label, url)
 	if not label or not label.UI or not label.UI.Framework then return end
@@ -230,6 +262,17 @@ end
 local function near(position)
 	local _, root = characterRoot()
 	return root and (root.Position - position).Magnitude <= 18
+end
+
+local function updatePlantLoopStatus(status)
+	if status then PlantLoop.Status = status end
+	if plantLoopStatusLabel then plantLoopStatusLabel:SetText("Plant Loop: " .. PlantLoop.Status) end
+	if plantLoopTreeLabel then
+		plantLoopTreeLabel:SetText(string.format("Candy trees: %d / %d", PlantLoop.TreeCount, PlantLoop.Settings.TreeCount))
+	end
+	if plantLoopWaterLabel then
+		plantLoopWaterLabel:SetText("Lowest tree water: " .. tostring(math.floor((PlantLoop.LowestWater or 0) + 0.5)) .. "%")
+	end
 end
 
 local function nativeFarmMatches(cropName)
@@ -681,6 +724,26 @@ local function farmCrop(crop, id)
 				lastProgress = os.clock()
 			end
 
+			if Farm.Mode == "plant" and PlantLoop.NeedsService and not PlantLoop.Busy
+				and type(servicePlantLoop) == "function" and os.clock() >= PlantLoop.NextServiceAttempt
+			then
+				local pausedAt = os.clock()
+				local okService, serviced = pcall(servicePlantLoop, id, false)
+				started += os.clock() - pausedAt
+				lastProgress = os.clock()
+				if not okService then
+					PlantLoop.NextServiceAttempt = os.clock() + 8
+					updatePlantLoopStatus("Service error: " .. tostring(serviced))
+				elseif serviced then
+					stage(3, crop[1], "Resuming after orchard")
+					if not near(crop[2]) and not warp(crop[2], id) then return false end
+					if not interact(crop, id) then break end
+					observedConsumeRevision = consumeRevision
+					resumeAttempts = 0
+				end
+				if not active(id) then return false end
+			end
+
 			local consumed = observedConsumeRevision ~= consumeRevision
 			if consumed then observedConsumeRevision = consumeRevision end
 			local sessionMissing = not nativeFarmMatches(crop[1])
@@ -1064,10 +1127,462 @@ local function deposit(id)
 	return active(id) and (tonumber(inventorySeed.Value) or 0) <= 0
 end
 
+-- Auto Candy Farm + Plant Loop --------------------------------------------
+local function plantLoopActive(id)
+	return active(id) and Farm.Mode == "plant" and PlantLoop.Enabled
+end
+
+local function waitPlantLoop(seconds, id)
+	local finish = os.clock() + seconds
+	repeat
+		if not plantLoopActive(id) then return false end
+		task.wait(math.min(0.1, math.max(0, finish - os.clock())))
+	until os.clock() >= finish
+	return plantLoopActive(id)
+end
+
+local function ownedTreeFolder()
+	local allTrees = Workspace:FindFirstChild("AllPlantedTrees")
+	return allTrees and allTrees:FindFirstChild("PlantedTrees_" .. tostring(player.UserId)) or nil
+end
+
+local function treePart(tree)
+	local prop = tree and tree:FindFirstChild("PROP")
+	local part = prop and prop:FindFirstChild("Part")
+	return part and part:IsA("BasePart") and part or nil
+end
+
+local function treeValue(tree, name)
+	local stats = tree and tree:FindFirstChild("Stats")
+	local value = stats and stats:FindFirstChild(name)
+	return value and value:IsA("ValueBase") and value or nil
+end
+
+local function treePrompt(tree)
+	if not tree then return nil end
+	local fallback
+	for _, object in ipairs(tree:GetDescendants()) do
+		if object:IsA("ProximityPrompt") then
+			fallback = fallback or object
+			local action = string.lower(tostring(object.ActionText or ""))
+			if (object.Parent and object.Parent.Name == "Attachment4")
+				or string.find(action, "collect", 1, true)
+			then
+				return object
+			end
+		end
+	end
+	return fallback
+end
+
+local function orchardTrees()
+	local result = {}
+	local folder = ownedTreeFolder()
+	if not folder then return result end
+	for _, tree in ipairs(folder:GetChildren()) do
+		local part = treePart(tree)
+		local water = treeValue(tree, "Water")
+		local growth = treeValue(tree, "Growth")
+		if part and water and growth then
+			result[#result + 1] = {
+				Model = tree,
+				Part = part,
+				Water = water,
+				Growth = growth,
+				UUID = tostring(tree:GetAttribute("TreeUUID") or tree.Name),
+			}
+		end
+	end
+	table.sort(result, function(left, right) return left.UUID < right.UUID end)
+	return result
+end
+
+local function refreshPlantLoopState()
+	local trees = orchardTrees()
+	local lowestWater = #trees > 0 and 100 or 0
+	local allMature = #trees >= PlantLoop.Settings.TreeCount
+	local lowWater = false
+	for _, entry in ipairs(trees) do
+		local water = tonumber(entry.Water.Value) or 0
+		local growth = tonumber(entry.Growth.Value) or 0
+		lowestWater = math.min(lowestWater, water)
+		lowWater = lowWater or water <= PlantLoop.Settings.WaterThreshold
+		allMature = allMature and growth >= 100
+	end
+	PlantLoop.TreeCount = #trees
+	PlantLoop.LowestWater = lowestWater
+	PlantLoop.NeedsService = #trees < PlantLoop.Settings.TreeCount or lowWater or allMature
+	updatePlantLoopStatus()
+	return trees, allMature, lowWater
+end
+
+local function orchardRemotes()
+	local grow = ReplicatedStorage:FindFirstChild("Grow_vegetables")
+	local remoteRoot = ReplicatedStorage:FindFirstChild("RemoteEvent_Solf")
+	local remoteA = remoteRoot and remoteRoot:FindFirstChild("RemoteEventA")
+	local gameModules = ReplicatedStorage:FindFirstChild("Game_Modules")
+	local safeRemotes = gameModules and gameModules:FindFirstChild("RemoteEventSafe")
+	return {
+		Plant = grow and grow:FindFirstChild("PlantTreeEvent"),
+		Water = grow and grow:FindFirstChild("GiveWater"),
+		Collect = grow and grow:FindFirstChild("CollectTree"),
+		Bag = remoteA and remoteA:FindFirstChild("Bag"),
+		Withdraw = safeRemotes and safeRemotes:FindFirstChild("WithdrawItem"),
+	}
+end
+
+local function backpackArguments()
+	local gui = player:FindFirstChildOfClass("PlayerGui")
+	local backpack = gui and gui:FindFirstChild("Backpack_Never")
+	local check = backpack and backpack:FindFirstChild("Check")
+	return check and check:FindFirstChild("hold"), check and check:FindFirstChild("delay")
+end
+
+local function equipBackground(itemName, id)
+	local character = player.Character
+	if not character then return false end
+	if character:FindFirstChild(itemName) then return true end
+	local remotes = orchardRemotes()
+	local holdValue, delayValue = backpackArguments()
+	if not remotes.Bag or not remotes.Bag:IsA("RemoteEvent") or not holdValue or not delayValue then return false end
+	remotes.Bag:FireServer("Use", itemName, holdValue, delayValue)
+	return waitFor(function()
+		local current = player.Character
+		return current and current:FindFirstChild(itemName)
+	end, 4, id) ~= nil
+end
+
+local function stowBackground(itemName)
+	local character = player.Character
+	if not character or not character:FindFirstChild(itemName) then return end
+	local remotes = orchardRemotes()
+	local holdValue, delayValue = backpackArguments()
+	if remotes.Bag and remotes.Bag:IsA("RemoteEvent") and holdValue and delayValue then
+		pcall(function() remotes.Bag:FireServer("Use", itemName, holdValue, delayValue) end)
+	end
+end
+
+local function orchardWarp(position, id)
+	local character, root = characterRoot()
+	if not character or not root or not plantLoopActive(id) then return false end
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	local landing = position + Vector3.new(0, 2.5, 5)
+	character:PivotTo(CFrame.lookAt(landing, position))
+	return waitPlantLoop(0.55, id)
+end
+
+local function pointInsideOrchard(point)
+	local inside = false
+	local previous = #ORCHARD_AREA
+	for index = 1, #ORCHARD_AREA do
+		local currentPoint = ORCHARD_AREA[index]
+		local previousPoint = ORCHARD_AREA[previous]
+		if ((currentPoint.Y > point.Y) ~= (previousPoint.Y > point.Y))
+			and point.X < (previousPoint.X - currentPoint.X) * (point.Y - currentPoint.Y)
+				/ (previousPoint.Y - currentPoint.Y) + currentPoint.X
+		then
+			inside = not inside
+		end
+		previous = index
+	end
+	return inside
+end
+
+local function groundCFrame(point, existingTrees)
+	if not pointInsideOrchard(point) then return nil end
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local excluded = { player.Character }
+	local allTrees = Workspace:FindFirstChild("AllPlantedTrees")
+	if allTrees then excluded[#excluded + 1] = allTrees end
+	params.FilterDescendantsInstances = excluded
+	params.IgnoreWater = true
+	local result = Workspace:Raycast(Vector3.new(point.X, 300, point.Y), Vector3.new(0, -600, 0), params)
+	if not result then return nil end
+	local folderGrow = Workspace:FindFirstChild("ALL_MAP")
+	folderGrow = folderGrow and folderGrow:FindFirstChild("Folder_Grow")
+	if folderGrow and not result.Instance:IsDescendantOf(folderGrow) then return nil end
+	for _, entry in ipairs(existingTrees or {}) do
+		if (entry.Part.Position - result.Position).Magnitude < 5 then return nil end
+	end
+	local yaw = math.rad(math.random(0, 359))
+	return CFrame.new(result.Position) * CFrame.Angles(0, yaw, 0)
+end
+
+local function randomOrchardCenter()
+	for _ = 1, 100 do
+		local point = Vector2.new(math.random(6400, 10400) / 10, math.random(8500, 14000) / 10)
+		local offsets = {
+			Vector2.new(0, 0), Vector2.new(7, 0), Vector2.new(-7, 0),
+			Vector2.new(0, 7), Vector2.new(0, -7),
+		}
+		local valid = true
+		for _, offset in ipairs(offsets) do
+			if not pointInsideOrchard(point + offset) then valid = false; break end
+		end
+		if valid then return point end
+	end
+	return Vector2.new(850, 1100)
+end
+
+local function generatePlantPositions(needed, existingTrees)
+	local result = {}
+	local center
+	if #existingTrees > 0 then
+		local total = Vector3.zero
+		for _, entry in ipairs(existingTrees) do total += entry.Part.Position end
+		local average = total / #existingTrees
+		center = Vector2.new(average.X, average.Z)
+	else
+		center = randomOrchardCenter()
+	end
+	PlantLoop.RoundCenter = center
+	local offsets = {
+		Vector2.new(0, 0), Vector2.new(7, 0), Vector2.new(-7, 0),
+		Vector2.new(0, 7), Vector2.new(0, -7), Vector2.new(7, 7),
+		Vector2.new(-7, 7), Vector2.new(7, -7), Vector2.new(-7, -7),
+	}
+	for _, offset in ipairs(offsets) do
+		if #result >= needed then break end
+		local frame = groundCFrame(center + offset, existingTrees)
+		if frame then
+			local tooClose = false
+			for _, saved in ipairs(result) do
+				if (saved.Position - frame.Position).Magnitude < 5 then tooClose = true; break end
+			end
+			if not tooClose then result[#result + 1] = frame end
+		end
+	end
+	return result
+end
+
+local function seedValues()
+	local item = player:FindFirstChild("Item")
+	local safe = player:FindFirstChild("Safe")
+	local inventorySeed = item and item:FindFirstChild("SeedCandy")
+	local safeSeed = safe and safe:FindFirstChild("SeedCandy")
+	return inventorySeed, safeSeed
+end
+
+local function withdrawSeeds(required, id)
+	local inventorySeed, safeSeed = seedValues()
+	if not inventorySeed or not inventorySeed:IsA("ValueBase") then return false end
+	local current = tonumber(inventorySeed.Value) or 0
+	if current >= required then return true end
+	local needed = required - current
+	if not safeSeed or not safeSeed:IsA("ValueBase") or (tonumber(safeSeed.Value) or 0) < needed then
+		PlantLoop.NeedsSeed = true
+		updatePlantLoopStatus("Need " .. tostring(needed) .. " SeedCandy; farming first")
+		return false
+	end
+	local withdraw = orchardRemotes().Withdraw
+	if not withdraw or not withdraw:IsA("RemoteEvent") then return false end
+	updatePlantLoopStatus("Withdrawing SeedCandy x" .. tostring(needed))
+	pcall(function() withdraw:FireServer("SeedCandy", needed) end)
+	waitFor(function() return (tonumber(inventorySeed.Value) or 0) >= required end, 4, id)
+	if (tonumber(inventorySeed.Value) or 0) < required then
+		for _ = 1, needed do
+			if not plantLoopActive(id) or (tonumber(inventorySeed.Value) or 0) >= required then break end
+			local previous = tonumber(inventorySeed.Value) or 0
+			pcall(function() withdraw:FireServer("SeedCandy") end)
+			waitFor(function() return (tonumber(inventorySeed.Value) or 0) > previous end, 1.5, id)
+		end
+	end
+	PlantLoop.NeedsSeed = (tonumber(inventorySeed.Value) or 0) < required
+	return not PlantLoop.NeedsSeed
+end
+
+local function plantMissingTrees(id)
+	local trees = orchardTrees()
+	local missing = PlantLoop.Settings.TreeCount - #trees
+	if missing <= 0 then return true, false end
+	if not withdrawSeeds(missing, id) then return false, false end
+	local remotes = orchardRemotes()
+	if not remotes.Plant or not remotes.Plant:IsA("RemoteEvent") then return false, false end
+	if not equipBackground("SeedCandy", id) then return false, false end
+	local positions = generatePlantPositions(missing, trees)
+	if #positions < missing then
+		stowBackground("SeedCandy")
+		return false, false
+	end
+	local planted = 0
+	for index, frame in ipairs(positions) do
+		if index > missing or not plantLoopActive(id) then break end
+		local beforeTrees = orchardTrees()
+		local beforeUUID = {}
+		for _, entry in ipairs(beforeTrees) do beforeUUID[entry.UUID] = true end
+		updatePlantLoopStatus(string.format("Planting tree %d / %d", #beforeTrees + 1, PlantLoop.Settings.TreeCount))
+		if not orchardWarp(frame.Position, id) then break end
+		local added
+		for attempt = 1, 2 do
+			pcall(function() remotes.Plant:FireServer(frame) end)
+			added = waitFor(function()
+				for _, entry in ipairs(orchardTrees()) do
+					if not beforeUUID[entry.UUID] then return entry end
+				end
+			end, 6, id)
+			if added then break end
+			if not waitPlantLoop(1, id) then break end
+		end
+		if not added then break end
+		planted += 1
+		trees = orchardTrees()
+		if not waitPlantLoop(0.6, id) then break end
+	end
+	stowBackground("SeedCandy")
+	refreshPlantLoopState()
+	return PlantLoop.TreeCount >= PlantLoop.Settings.TreeCount, planted > 0
+end
+
+local function waterNeededTrees(id, force)
+	local trees = orchardTrees()
+	local targets = {}
+	for _, entry in ipairs(trees) do
+		if (tonumber(entry.Water.Value) or 0) < PlantLoop.Settings.WaterTarget
+			and (force or (tonumber(entry.Water.Value) or 0) <= PlantLoop.Settings.WaterThreshold)
+		then
+			targets[#targets + 1] = entry
+		end
+	end
+	if #targets == 0 then return true, false end
+	local item = player:FindFirstChild("Item")
+	local wateringcan = item and item:FindFirstChild("Wateringcan")
+	local waterAmount = item and item:FindFirstChild("WaterAmount")
+	if not wateringcan or (tonumber(wateringcan.Value) or 0) < 1 or not waterAmount or not waterAmount:IsA("ValueBase") then
+		updatePlantLoopStatus("Wateringcan unavailable")
+		return false, false
+	end
+	local giveWater = orchardRemotes().Water
+	if not giveWater or not giveWater:IsA("RemoteEvent") or not equipBackground("Wateringcan", id) then return false, false end
+	waterAmount.Value = 100
+	local watered = 0
+	for index, entry in ipairs(targets) do
+		if not plantLoopActive(id) or not entry.Model.Parent then break end
+		updatePlantLoopStatus(string.format("Watering tree %d / %d", index, #targets))
+		local applications = 0
+		while entry.Model.Parent and (tonumber(entry.Water.Value) or 0) < PlantLoop.Settings.WaterTarget
+			and applications < 2 and plantLoopActive(id)
+		do
+			if (tonumber(waterAmount.Value) or 0) < 10 then waterAmount.Value = 100 end
+			if not orchardWarp(entry.Part.Position, id) then break end
+			local before = tonumber(entry.Water.Value) or 0
+			pcall(function() giveWater:FireServer() end)
+			waterAmount.Value = math.max(0, (tonumber(waterAmount.Value) or 0) - 10)
+			applications += 1
+			local accepted = waitFor(function()
+				return not entry.Model.Parent or (tonumber(entry.Water.Value) or 0) > before
+			end, 4, id)
+			if not accepted then break end
+			watered += 1
+			if not waitPlantLoop(0.45, id) then break end
+		end
+	end
+	stowBackground("Wateringcan")
+	refreshPlantLoopState()
+	return true, watered > 0
+end
+
+local function collectMatureRound(id)
+	local trees, allMature = refreshPlantLoopState()
+	if not allMature or #trees < PlantLoop.Settings.TreeCount then return true, false end
+	local oldUUIDs = {}
+	for _, entry in ipairs(trees) do oldUUIDs[entry.UUID] = true end
+	local collected = 0
+	for index, entry in ipairs(trees) do
+		if not plantLoopActive(id) then break end
+		updatePlantLoopStatus(string.format("Collecting tree %d / %d", index, #trees))
+		if not orchardWarp(entry.Part.Position, id) then break end
+		local prompt = treePrompt(entry.Model)
+		if prompt and prompt.Enabled then
+			for _ = 1, 2 do
+				if type(fireproximityprompt) == "function" then
+					pcall(function() fireproximityprompt(prompt, 0, true) end)
+				else
+					pcall(function() prompt:InputHoldBegin() end)
+					task.wait(math.max(0.1, prompt.HoldDuration))
+					pcall(function() prompt:InputHoldEnd() end)
+				end
+				if waitFor(function() return not entry.Model.Parent end, 4, id) then break end
+			end
+		end
+		if not entry.Model.Parent then collected += 1 end
+	end
+	local cleared = waitFor(function()
+		for _, entry in ipairs(orchardTrees()) do
+			if oldUUIDs[entry.UUID] then return false end
+		end
+		return true
+	end, 10, id) ~= nil
+	if cleared then PlantLoop.RoundCenter = nil end
+	refreshPlantLoopState()
+	return cleared, collected > 0
+end
+
+servicePlantLoop = function(id, force)
+	if not plantLoopActive(id) or PlantLoop.Busy then return false end
+	refreshPlantLoopState()
+	if not force and not PlantLoop.NeedsService then return false end
+	PlantLoop.Busy = true
+	local ok, performed, success = pcall(function()
+		local currentTrees, allMature = refreshPlantLoopState()
+		local didWork = false
+		local serviceOK = true
+		local plantedRound = false
+		while consumeBusy and plantLoopActive(id) do task.wait(0.1) end
+		if not plantLoopActive(id) then return false, false end
+
+		if allMature then
+			local collectedOK, collected = collectMatureRound(id)
+			didWork = didWork or collected
+			serviceOK = serviceOK and collectedOK
+			currentTrees = orchardTrees()
+		end
+
+		if serviceOK and #currentTrees < PlantLoop.Settings.TreeCount then
+			local plantedOK, planted = plantMissingTrees(id)
+			didWork = didWork or planted
+			plantedRound = planted
+			serviceOK = serviceOK and plantedOK
+			currentTrees = orchardTrees()
+		end
+
+		if serviceOK and #currentTrees > 0 then
+			local wateredOK, watered = waterNeededTrees(id, force or plantedRound)
+			didWork = didWork or watered
+			serviceOK = serviceOK and wateredOK
+		end
+		return didWork, serviceOK
+	end)
+	PlantLoop.Busy = false
+	if not ok then
+		PlantLoop.NextServiceAttempt = os.clock() + 8
+		updatePlantLoopStatus("Service error; retry in 8s")
+		return false
+	end
+	if not plantLoopActive(id) then return false end
+	PlantLoop.NextServiceAttempt = os.clock() + (success and 2 or 8)
+	refreshPlantLoopState()
+	if success then
+		updatePlantLoopStatus(PlantLoop.NeedsService and "Monitoring; service pending" or "Monitoring while candy farm runs")
+	elseif PlantLoop.NeedsSeed then
+		updatePlantLoopStatus("Waiting for Auto Candy to craft SeedCandy")
+	else
+		updatePlantLoopStatus("Service retry in 8s")
+	end
+	return performed
+end
+
 local function cycle(id)
+	if Farm.Mode == "plant" and PlantLoop.NeedsService and type(servicePlantLoop) == "function" then
+		pcall(servicePlantLoop, id, false)
+	end
 	if not scanInventory(id) then return false, "Inventory scan failed" end
 	for _, crop in ipairs(CROPS) do
 		if not active(id) then return false, "Stopped" end
+		if Farm.Mode == "plant" and PlantLoop.NeedsService and type(servicePlantLoop) == "function" then
+			pcall(servicePlantLoop, id, false)
+		end
 		if Farm.Counts[crop[1]] < 100 then
 			if not farmCrop(crop, id) then return false, "Farm failed: "..crop[1] end
 			if not cooldown(id) then return false, "Stopped" end
@@ -1081,9 +1596,12 @@ end
 
 function Farm:Start()
 	if self.Enabled then return end
-	self.Enabled, self.Crafted = true, 0
+	PlantLoop.Enabled = false
+	PlantLoop.Busy = false
+	self.Enabled, self.Crafted, self.Mode = true, 0, "normal"
 	self.RunId += 1
 	local id = self.RunId
+	if type(ensureAutoConsume) == "function" then ensureAutoConsume() end
 	task.spawn(function()
 		while active(id) do
 			local ok, success, reason = pcall(cycle, id)
@@ -1097,15 +1615,85 @@ function Farm:Start()
 				if not waitActive(8, id) then break end
 			end
 		end
-		if self.RunId == id then self.Enabled=false; self.Stage=0; self.Cooldown=0; updateStatus("Stopped") end
+		if self.RunId == id then
+			self.Enabled=false; self.Mode=nil; self.Stage=0; self.Cooldown=0
+			updateStatus("Stopped")
+		end
 	end)
 end
 
 function Farm:Stop()
+	local wasPlantLoop = self.Mode == "plant"
 	self.Enabled=false; self.RunId+=1; self.Stage=0; self.NextCrop=nil; self.Cooldown=0
+	self.Mode=nil
+	if wasPlantLoop or PlantLoop.Enabled then
+		PlantLoop.Enabled=false; PlantLoop.Busy=false; PlantLoop.NeedsService=false
+		PlantLoop.Status="Stopped"
+		updatePlantLoopStatus()
+	end
 	local openCraft = craftUI()
 	if openCraft then task.spawn(function() closeGui(openCraft) end) end
 	updateStatus("Stopped")
+end
+
+function PlantLoop:Start()
+	if self.Enabled then return end
+	if Farm.Enabled then Farm:Stop() end
+
+	self.Enabled = true
+	self.Busy = false
+	self.NeedsSeed = false
+	self.NeedsService = true
+	self.NextServiceAttempt = 0
+	self.Status = "Starting"
+	Farm.Enabled, Farm.Crafted, Farm.Mode = true, 0, "plant"
+	Farm.RunId += 1
+	local id = Farm.RunId
+	if type(ensureAutoConsume) == "function" then ensureAutoConsume() end
+	refreshPlantLoopState()
+	updatePlantLoopStatus("Starting 5-tree loop")
+
+	task.spawn(function()
+		while plantLoopActive(id) do
+			local ok, message = pcall(refreshPlantLoopState)
+			if not ok then updatePlantLoopStatus("Monitor error: " .. tostring(message)) end
+			if not waitPlantLoop(self.Settings.MonitorInterval, id) then break end
+		end
+	end)
+
+	task.spawn(function()
+		pcall(servicePlantLoop, id, true)
+		while plantLoopActive(id) do
+			local ok, success, reason = pcall(cycle, id)
+			if not plantLoopActive(id) then break end
+			if not ok then reason, success = tostring(success), false end
+			if success then
+				refreshPlantLoopState()
+				if self.NeedsService then pcall(servicePlantLoop, id, false) end
+				stage(0, nil, "Candy cycle complete; orchard monitored")
+				if not waitPlantLoop(0.75, id) then break end
+			else
+				stage(7, nil, reason or "Retrying")
+				if not waitPlantLoop(8, id) then break end
+			end
+		end
+		if Farm.RunId == id then
+			Farm.Enabled=false; Farm.Mode=nil; Farm.Stage=0; Farm.Cooldown=0
+			self.Enabled=false; self.Busy=false; self.NeedsService=false
+			updateStatus("Stopped")
+			updatePlantLoopStatus("Stopped")
+		end
+	end)
+end
+
+function PlantLoop:Stop()
+	if Farm.Mode == "plant" then
+		Farm:Stop()
+	else
+		self.Enabled=false; self.Busy=false; self.NeedsService=false
+		self.Status="Stopped"
+		updatePlantLoopStatus()
+	end
 end
 
 -- Auto Eat / Drink ---------------------------------------------------------
@@ -1252,6 +1840,7 @@ local function refreshConsumeValues()
 end
 
 local function consumeGuiBusy()
+	if PlantLoop.Busy then return true end
 	if Farm.Stage == 1 or Farm.Stage == 2 or Farm.Stage == 5 or Farm.Stage == 6 then return true end
 	return craftUI() ~= nil or inventoryPanel() ~= nil or lockerPanels() ~= nil
 end
@@ -1362,6 +1951,11 @@ function Consume:Stop()
 	consumeBusy = false
 	self.Progress = -1
 	updateConsumeUI("Disabled")
+end
+
+ensureAutoConsume = function()
+	if not Consume.Enabled then Consume:Start() end
+	if consumeToggle and not consumeToggle.Value then consumeToggle:SetValue(true, true) end
 end
 
 local ESP = {
@@ -2958,6 +3552,7 @@ getgenv().AraiESP = ESP
 local Window = Library:Window({ Name="A-RAI HUB | Never Town", Game="Never Town" })
 local FarmPage = Window:CreatePage({ Name="FARM" })
 local Controls = FarmPage:CreateSection({ Name="AUTOMATION", Side=1, Collapsed=false })
+local PlantControls = FarmPage:CreateSection({ Name="CANDY FARM PLANT LOOP", Side=1, Collapsed=false })
 local FishingControls = FarmPage:CreateSection({ Name="FISHING", Side=1, Collapsed=false })
 local Monitor = FarmPage:CreateSection({ Name="FARM STATUS", Side=2, Collapsed=false })
 
@@ -2980,12 +3575,31 @@ local RejoinSettings = HubSettings:CreateSection({ Name="AUTO REJOIN", Side=2, C
 Spectate.Page = PlayerPage
 GPS.Page = PlayerPage
 
-Controls:Toggle({ Name="Auto Farm Candy", Flag="AraiAutoCandy", Default=false,
-	Callback=function(value) if value then Farm:Start() else Farm:Stop() end end })
+normalFarmToggle = Controls:Toggle({ Name="Auto Farm Candy", Flag="AraiAutoCandy", Default=false,
+	Callback=function(value)
+		if value then
+			if PlantLoop.Enabled then PlantLoop:Stop() end
+			if plantLoopToggle and plantLoopToggle.Value then plantLoopToggle:SetValue(false, true) end
+			Farm:Start()
+		elseif Farm.Mode == "normal" then
+			Farm:Stop()
+		end
+	end })
 Controls:Slider({ Name="Server Cooldown", Flag="AraiCandyCooldown", Min=20, Max=60, Default=30, Suffix="s", Compact=true,
 	Callback=function(value) Farm.Settings.Cooldown=math.floor(value) end })
 Controls:Slider({ Name="Teleport Y Offset", Flag="AraiCandyYOffset", Min=0, Max=8, Default=0, Suffix=" studs", Compact=true,
 	Callback=function(value) Farm.Settings.YOffset=value end })
+
+plantLoopToggle = PlantControls:Toggle({ Name="AutoCandyFarmPlantLoop", Flag="AraiAutoCandyPlantLoop", Default=false,
+	Callback=function(value)
+		if value then
+			if Farm.Enabled then Farm:Stop() end
+			if normalFarmToggle and normalFarmToggle.Value then normalFarmToggle:SetValue(false, true) end
+			PlantLoop:Start()
+		else
+			PlantLoop:Stop()
+		end
+	end })
 
 local fishingToggle
 fishingToggle = FishingControls:Toggle({ Name="Auto Fishing", Flag="AraiAutoFishing", Default=false,
@@ -3058,8 +3672,16 @@ invisibleToggle = InvisibleControls:Toggle({ Name="Underground Invisible", Flag=
 		end
 	end })
 
-Survival:Toggle({ Name="Auto Eat / Drink", Flag="AraiAutoConsume", Default=false,
-	Callback=function(value) if value then Consume:Start() else Consume:Stop() end end })
+consumeToggle = Survival:Toggle({ Name="Auto Eat / Drink", Flag="AraiAutoConsume", Default=false,
+	Callback=function(value)
+		if value then
+			Consume:Start()
+		elseif Farm.Enabled then
+			task.defer(function() ensureAutoConsume() end)
+		else
+			Consume:Stop()
+		end
+	end })
 Survival:Slider({ Name="Eat Below", Flag="AraiHungerThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
 	Callback=function(value) Consume.HungerThreshold=math.floor(value); updateConsumeUI() end })
 Survival:Slider({ Name="Drink Below", Flag="AraiThirstThreshold", Min=10, Max=90, Default=30, Suffix="%", Compact=true,
@@ -3086,6 +3708,9 @@ ESPControls:Slider({ Name="Max Players", Flag="AraiESPMaxPlayers", Min=5, Max=30
 espStatusLabel = ESPControls:Label({ Name="ESP: OFF" })
 
 statusLabel = Monitor:Label("Status: Idle")
+plantLoopStatusLabel = Monitor:Label({ Name="Plant Loop: Idle" })
+plantLoopTreeLabel = Monitor:Label({ Name="Candy trees: 0 / 5" })
+plantLoopWaterLabel = Monitor:Label({ Name="Lowest tree water: 0%" })
 spectateReadyLabel = SpectateInfo:Label({ Name="Players ready: 0 / 0" })
 spectateStatusLabel = SpectateInfo:Label({ Name="Status: Idle" })
 for _, crop in ipairs(CROPS) do
