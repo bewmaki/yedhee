@@ -8,7 +8,11 @@ local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
 local player = Players.LocalPlayer
+local queuedRejoinPending = getgenv().AraiRejoinPending == true
+getgenv().AraiRejoinPending = nil
 local platformOk, platform = pcall(function() return UserInputService:GetPlatform() end)
 local mobilePlatform = platformOk and (platform == Enum.Platform.Android or platform == Enum.Platform.IOS)
 local IS_MOBILE = getgenv().AraiForceMobile == true
@@ -102,6 +106,11 @@ if type(previousAntiAFK) == "table" and type(previousAntiAFK.Stop) == "function"
 	pcall(previousAntiAFK.Stop, previousAntiAFK)
 end
 getgenv().AraiAntiAFK = nil
+local previousServerRejoin = getgenv().AraiServerRejoin
+if type(previousServerRejoin) == "table" and type(previousServerRejoin.Stop) == "function" then
+	pcall(previousServerRejoin.Stop, previousServerRejoin)
+end
+getgenv().AraiServerRejoin = nil
 local previousFishing = getgenv().AraiFishingAutoPerfect or getgenv().FishingAutoPerfect
 if type(previousFishing) == "table" then
 	previousFishing.Enabled = false
@@ -2629,10 +2638,297 @@ function FishingAutoPerfect:Stop()
 	self:ResetRound()
 end
 
+local ServerRejoin = {
+	Enabled = false,
+	Busy = false,
+	RunId = 0,
+	LobbyPlaceId = 111579023868341,
+	MapPlaceId = 77908479907662,
+	CollectSeconds = 8,
+	RetryDelay = 15,
+	Status = "Disabled",
+	CurrentShard = nil,
+	FailedShards = {},
+	Connections = {},
+}
+local serverRejoinStatusLabel
+
+function ServerRejoin:SetStatus(status)
+	self.Status = status
+	if serverRejoinStatusLabel then
+		serverRejoinStatusLabel:SetText("Auto Rejoin: " .. status)
+	end
+end
+
+function ServerRejoin:DisconnectAll()
+	for _, connection in ipairs(self.Connections) do
+		pcall(function()
+			connection:Disconnect()
+		end)
+	end
+	table.clear(self.Connections)
+end
+
+function ServerRejoin:QueueScript(pending)
+	local queue = queue_on_teleport
+	if type(queue) ~= "function" and type(syn) == "table" then
+		queue = syn.queue_on_teleport
+	end
+	if type(queue) ~= "function" and type(fluxus) == "table" then
+		queue = fluxus.queue_on_teleport
+	end
+	if type(queue) ~= "function" then
+		return false
+	end
+	local source = "getgenv().AraiRejoinPending = " .. tostring(pending == true) .. "\n"
+		.. "loadstring(game:HttpGet(\"https://raw.githubusercontent.com/bewmaki/yedhee/main/CandyAutoFarm.lua\"))()"
+	return pcall(queue, source)
+end
+
+function ServerRejoin:Schedule(seconds, callback)
+	local id = self.RunId
+	task.delay(seconds, function()
+		if self.Enabled and self.RunId == id then
+			callback()
+		end
+	end)
+end
+
+function ServerRejoin:ReturnToLobby(reason)
+	if not self.Enabled or self.Busy then
+		return
+	end
+	self.Busy = true
+	self:SetStatus((reason or "Disconnected") .. " | returning to lobby")
+	if Farm.Enabled then
+		Farm:Stop()
+	end
+	self:QueueScript(true)
+	local ok, message = pcall(function()
+		TeleportService:Teleport(self.LobbyPlaceId, player)
+	end)
+	if not ok then
+		self.Busy = false
+		self:SetStatus("Lobby teleport failed | retrying")
+		self:Schedule(5, function()
+			self:ReturnToLobby(tostring(message))
+		end)
+	end
+end
+
+function ServerRejoin:JoinLowestShard()
+	if not self.Enabled or self.Busy then
+		return
+	end
+	if game.PlaceId ~= self.LobbyPlaceId then
+		self:ReturnToLobby("Rejoin requested")
+		return
+	end
+
+	self.Busy = true
+	self:SetStatus("Collecting low-player servers")
+	local id = self.RunId
+	task.spawn(function()
+		local remotes = ReplicatedStorage:WaitForChild("MatchmakingRemotes", 10)
+		local requestList = remotes and remotes:FindFirstChild("RequestShardList")
+		local statsPush = remotes and remotes:FindFirstChild("ServerStatsPush")
+		local joinByIndex = remotes and remotes:FindFirstChild("RequestJoinByIndex")
+		if not requestList or not statsPush or not joinByIndex then
+			self.Busy = false
+			self:SetStatus("Matchmaking unavailable | retrying")
+			self:Schedule(self.RetryDelay, function()
+				self:JoinLowestShard()
+			end)
+			return
+		end
+
+		local shards = {}
+		local statsConnection = statsPush.OnClientEvent:Connect(function(payload)
+			if type(payload) ~= "table" then
+				return
+			end
+			local index = tonumber(payload.shardIndex)
+			local count = tonumber(payload.playerCount)
+			if index ~= nil and count ~= nil then
+				shards[index] = payload
+			end
+		end)
+
+		task.spawn(function()
+			pcall(function()
+				requestList:InvokeServer()
+			end)
+		end)
+
+		local deadline = os.clock() + self.CollectSeconds
+		repeat
+			task.wait(0.1)
+		until os.clock() >= deadline or not self.Enabled or self.RunId ~= id
+		statsConnection:Disconnect()
+		if not self.Enabled or self.RunId ~= id then
+			self.Busy = false
+			return
+		end
+
+		local now = os.clock()
+		local candidates = {}
+		for _, shard in pairs(shards) do
+			local index = tonumber(shard.shardIndex)
+			local count = tonumber(shard.playerCount)
+			local ping = tonumber(shard.serverPing)
+			local failedUntil = index and self.FailedShards[index] or nil
+			if index ~= nil and count ~= nil and count >= 1 and count <= 2
+				and ping ~= nil and ping > 0 and (failedUntil == nil or failedUntil <= now) then
+				candidates[#candidates + 1] = shard
+			end
+		end
+
+		table.sort(candidates, function(first, second)
+			local firstCount = tonumber(first.playerCount) or 999
+			local secondCount = tonumber(second.playerCount) or 999
+			if firstCount ~= secondCount then
+				return firstCount < secondCount
+			end
+			local firstPing = tonumber(first.serverPing) or 99999
+			local secondPing = tonumber(second.serverPing) or 99999
+			if firstPing ~= secondPing then
+				return firstPing < secondPing
+			end
+			return (tonumber(first.shardIndex) or 999) < (tonumber(second.shardIndex) or 999)
+		end)
+
+		local target = candidates[1]
+		if target == nil then
+			self.Busy = false
+			self:SetStatus("No stable 1-2 player server | retry in 15s")
+			self:Schedule(self.RetryDelay, function()
+				self:JoinLowestShard()
+			end)
+			return
+		end
+
+		local shardIndex = tonumber(target.shardIndex)
+		self.CurrentShard = shardIndex
+		self:SetStatus(string.format(
+			"Joining shard %d | %d players | %d ping",
+			shardIndex,
+			tonumber(target.playerCount) or -1,
+			tonumber(target.serverPing) or -1
+		))
+		self:QueueScript(false)
+		local joined, response = pcall(function()
+			return joinByIndex:InvokeServer(shardIndex)
+		end)
+		if not joined then
+			self.FailedShards[shardIndex] = os.clock() + 60
+			self.CurrentShard = nil
+			self.Busy = false
+			self:SetStatus("Join rejected | retrying")
+			self:Schedule(5, function()
+				self:JoinLowestShard()
+			end)
+			return
+		end
+
+		self:SetStatus("Join accepted | waiting for teleport")
+		self:Schedule(12, function()
+			if game.PlaceId == self.LobbyPlaceId and self.Busy then
+				self.FailedShards[shardIndex] = os.clock() + 60
+				self.CurrentShard = nil
+				self.Busy = false
+				self:JoinLowestShard()
+			end
+		end)
+	end)
+end
+
+function ServerRejoin:HandleDisconnect(reason)
+	if not self.Enabled or self.Busy then
+		return
+	end
+	if game.PlaceId == self.LobbyPlaceId then
+		self:JoinLowestShard()
+	else
+		self:ReturnToLobby(reason)
+	end
+end
+
+function ServerRejoin:Start()
+	if self.Enabled then
+		return
+	end
+	self.Enabled = true
+	self.Busy = false
+	self.RunId += 1
+	local id = self.RunId
+	self:DisconnectAll()
+
+	self.Connections[#self.Connections + 1] = GuiService.ErrorMessageChanged:Connect(function(message)
+		if self.Enabled and self.RunId == id and type(message) == "string" and message ~= "" then
+			self:HandleDisconnect("Connection lost")
+		end
+	end)
+	self.Connections[#self.Connections + 1] = TeleportService.TeleportInitFailed:Connect(function(failedPlayer)
+		if failedPlayer ~= player or not self.Enabled or self.RunId ~= id then
+			return
+		end
+		if self.CurrentShard ~= nil then
+			self.FailedShards[self.CurrentShard] = os.clock() + 60
+		end
+		self.CurrentShard = nil
+		self.Busy = false
+		self:SetStatus("Teleport failed | retrying")
+		self:Schedule(5, function()
+			if game.PlaceId == self.LobbyPlaceId then
+				self:JoinLowestShard()
+			else
+				self:ReturnToLobby("Teleport retry")
+			end
+		end)
+	end)
+
+	pcall(function()
+		local coreGui = game:GetService("CoreGui")
+		local promptGui = coreGui:FindFirstChild("RobloxPromptGui")
+		local overlay = promptGui and promptGui:FindFirstChild("promptOverlay")
+		if overlay then
+			self.Connections[#self.Connections + 1] = overlay.ChildAdded:Connect(function(child)
+				local lowerName = string.lower(child.Name)
+				if lowerName:find("error", 1, true) then
+					self:HandleDisconnect("Server closed")
+				end
+			end)
+		end
+	end)
+
+	local continueFromKick = queuedRejoinPending
+	queuedRejoinPending = false
+	if continueFromKick and game.PlaceId == self.LobbyPlaceId then
+		self:SetStatus("Lobby ready | finding low server")
+		task.defer(function()
+			if self.Enabled and self.RunId == id then
+				self:JoinLowestShard()
+			end
+		end)
+	else
+		self:SetStatus("Watching for kick / server restart")
+	end
+end
+
+function ServerRejoin:Stop()
+	self.Enabled = false
+	self.Busy = false
+	self.RunId += 1
+	self.CurrentShard = nil
+	self:DisconnectAll()
+	self:SetStatus("Disabled")
+end
+
 getgenv().AraiSpectate = Spectate
 getgenv().AraiGPS = GPS
 getgenv().AraiInvisible = Invisible
 getgenv().AraiAntiAFK = AntiAFK
+getgenv().AraiServerRejoin = ServerRejoin
 getgenv().AraiFishingAutoPerfect = FishingAutoPerfect
 getgenv().FishingAutoPerfect = FishingAutoPerfect
 
@@ -2641,6 +2937,7 @@ Farm.Spectate = Spectate
 Farm.GPS = GPS
 Farm.Invisible = Invisible
 Farm.AntiAFK = AntiAFK
+Farm.ServerRejoin = ServerRejoin
 Farm.FishingAutoPerfect = FishingAutoPerfect
 getgenv().AraiESP = ESP
 
@@ -2665,6 +2962,7 @@ SettingsPage.Name = "SETTINGS"
 if SettingsPage.UI and SettingsPage.UI.Label then SettingsPage.UI.Label.Text = SettingsPage.Name end
 local HubSettings = SettingsPage:CreateSubPage({ Name="A-RAI" })
 local DeviceSettings = HubSettings:CreateSection({ Name="DEVICE & PERFORMANCE", Side=1, Collapsed=false })
+local RejoinSettings = HubSettings:CreateSection({ Name="AUTO REJOIN", Side=2, Collapsed=false })
 Spectate.Page = PlayerPage
 GPS.Page = PlayerPage
 
@@ -2787,6 +3085,12 @@ attachIcon(craftedLabel, CANDY_ICONS.SeedCandy)
 local antiAFKToggle = DeviceSettings:Toggle({ Name="Anti AFK", Flag="AraiAntiAFKEnabled", Default=true,
 	Callback=function(value) if value then AntiAFK:Start() else AntiAFK:Stop() end end })
 
+local serverRejoinToggle = RejoinSettings:Toggle({ Name="Auto Rejoin After Kick", Flag="AraiAutoRejoin", Default=true,
+	Callback=function(value) if value then ServerRejoin:Start() else ServerRejoin:Stop() end end })
+RejoinSettings:Label({ Name="Reconnect target: stable 1-2 player server" })
+serverRejoinStatusLabel = RejoinSettings:Label({ Name="Auto Rejoin: Disabled" })
+ServerRejoin:SetStatus(ServerRejoin.Status)
+
 local baseLibraryUnload = Library.Unload
 function Library:Unload(...)
 	AntiAFK:Stop()
@@ -2796,6 +3100,7 @@ function Library:Unload(...)
 	GPS:Stop()
 	ESP:Stop()
 	Consume:Stop()
+	ServerRejoin:Stop()
 	Farm:Stop()
 	return baseLibraryUnload(self, ...)
 end
@@ -2805,6 +3110,7 @@ Spectate:RefreshPlayers()
 GPS:Start()
 if antiAFKToggle.Value then AntiAFK:Start() end
 if espToggle.Value then ESP:Start() end
+if serverRejoinToggle.Value then ServerRejoin:Start() end
 
 Window:SetOpen(true)
 updateStatus()
